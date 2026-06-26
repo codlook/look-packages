@@ -1,0 +1,68 @@
+use file;
+use "C:/Users/msi/Desktop/look/packages/firebase/firebase.lk";
+
+// Service Account JSON içeriğini oku
+$sa_json = file::read("C:/Users/msi/Desktop/look/examples/testlook-e8f98-firebase-adminsdk-fbsvc-b8f1e08483.json");
+$db = firebase_init($sa_json, "testlook-e8f98");
+print("Firebase bağlantısı hazır: " . $db["project_id"] . "\n\n");
+
+// ── SET ───────────────────────────────────────────────────────────────────────
+print("=== SET ===\n");
+$ok = firebase_set($db, "kullanicilar", "user-1", [
+    "isim"    => "Faik",
+    "soyisim" => "Celik",
+    "yas"     => 37,
+    "aktif"   => true,
+    "puan"    => 98.5
+]);
+print("SET user-1: " . $ok . "\n\n");
+
+// ── GET ───────────────────────────────────────────────────────────────────────
+print("=== GET ===\n");
+$user = firebase_get($db, "kullanicilar", "user-1");
+if (firebase_ok($user)) {
+    print("isim:   " . $user["isim"] . "\n");
+    print("yas:    " . $user["yas"] . "\n");
+    print("aktif:  " . $user["aktif"] . "\n");
+    print("puan:   " . $user["puan"] . "\n");
+    print("__id__: " . $user["__id__"] . "\n\n");
+} else {
+    print("GET basarisiz\n\n");
+}
+
+// ── ADD (otomatik ID) ─────────────────────────────────────────────────────────
+print("=== ADD ===\n");
+$id1 = firebase_add($db, "urunler", ["ad" => "Laptop", "fiyat" => 25000, "stok" => 15]);
+$id2 = firebase_add($db, "urunler", ["ad" => "Mouse",  "fiyat" => 350,   "stok" => 100]);
+print("Laptop id: " . $id1 . "\n");
+print("Mouse  id: " . $id2 . "\n\n");
+
+// ── LIST ──────────────────────────────────────────────────────────────────────
+print("=== LIST ===\n");
+$urunler = firebase_list($db, "urunler", null);
+print("Urun sayisi: " . count($urunler) . "\n");
+foreach ($urunler as $u) {
+    print("  [" . $u["__id__"] . "] " . $u["ad"] . " - " . $u["fiyat"] . " TL\n");
+}
+print("\n");
+
+// ── UPDATE (kismi) ────────────────────────────────────────────────────────────
+print("=== UPDATE ===\n");
+$updated = firebase_update($db, "kullanicilar", "user-1", ["puan" => 99.9, "seviye" => "gold"]);
+print("UPDATE: " . $updated . "\n");
+$user2 = firebase_get($db, "kullanicilar", "user-1");
+print("Yeni puan: " . $user2["puan"] . ", seviye: " . $user2["seviye"] . "\n\n");
+
+// ── DELETE ────────────────────────────────────────────────────────────────────
+print("=== DELETE ===\n");
+$del = firebase_delete($db, "urunler", $id2);
+print("DELETE mouse: " . $del . "\n");
+$urunler2 = firebase_list($db, "urunler", null);
+print("Kalan urun: " . count($urunler2) . "\n\n");
+
+// ── OLMAYAN DOC ───────────────────────────────────────────────────────────────
+print("=== OLMAYAN DOC ===\n");
+$yok = firebase_get($db, "kullanicilar", "yok-bu-id");
+print("Sonuc: " . $yok . "\n\n");
+
+print("Tum testler tamamlandi.\n");

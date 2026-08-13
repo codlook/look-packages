@@ -41,5 +41,11 @@ $j = monitor_json()
 $fail = $fail + chk("json: request_count",      $j["request_count"] != null)
 $fail = $fail + chk("json: db_pool_busy",       $j["db_pool_busy"] != null)
 
+# ── FAIL-LOUD kapısı: eski-şekil stats (errors_5xx yok) → throw etmeli (sessiz boş metrik DEĞİL) ──
+$guard_threw = false
+try { _mon_require(["uptime_sec" => 1, "request_count" => 0]) }
+catch ($e) { $guard_threw = true }
+$fail = $fail + chk("guard: eski runtime → fail-loud throw", $guard_threw)
+
 if ($fail == 0) { print("PASS: monitor paketi (11 metrik + tip + json)") }
 else { print("FAIL: monitor paketi — " . $fail . " sorun"); exit(1) }

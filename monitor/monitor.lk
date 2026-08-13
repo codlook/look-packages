@@ -12,6 +12,21 @@ use runtime;
 use string;
 use json;
 
+// ── İç yardımcı: runtime uyumluluk kapısı (FAIL-LOUD) ────────────────────────
+// ASIL RİSK: eski bir LOOK runtime'da runtime::stats() gözlemlenebilirlik sayaçlarını (errors_5xx,
+// latency_*, db_pool_*, vm_disabled_routes) DÖNDÜRMEZ → paket SESSİZCE boş metrik üretir (Grafana
+// grafiği boş, alarm hiç tetiklenmez, kimse fark etmez). Bu kapı sessiz kırılmayı gürültülü hataya
+// çevirir: eksik alan → net throw. Fonksiyon-içi (dosya-başı değil): app çökmez, sadece /metrics
+// 500 verir → Prometheus scrape'i "target down" der (boş metrikten iyi). Alan-varlığı sürüm-numarasından
+// güvenilir: lk install version kontrolü yapmıyor (ölçüldü), ama alan ya vardır ya yoktur.
+function _mon_require($s) {
+    if ($s["errors_5xx"] == null) {
+        throw "monitor paketi daha yeni bir LOOK runtime gerektiriyor: runtime::stats() "
+            . "gözlemlenebilirlik sayaçları eksik (errors_5xx/latency/db_pool/vm_disabled_routes). "
+            . "lk --version ile kontrol edin — 2026-08 sonrası build gerekli.";
+    }
+}
+
 // ── İç yardımcı: tek Prometheus metrik bloğu (HELP + TYPE + değer) ────────────
 function _mon_metric($name, $type, $help, $value) {
     return "# HELP " . $name . " " . $help . "\n"
@@ -23,6 +38,7 @@ function _mon_metric($name, $type, $help, $value) {
 // Kullanım: route("GET", "/metrics", function() { response::text(monitor_prometheus()) })
 function monitor_prometheus() {
     $s = runtime::stats();
+    _mon_require($s);   // fail-loud: eski runtime → boş metrik yerine net hata
     $out = "";
     // ── counter'lar (_total soneki Prometheus konvansiyonu) ──
     $out = $out . _mon_metric("look_requests_total", "counter",
@@ -54,7 +70,9 @@ function monitor_prometheus() {
 // monitor_json() → runtime::stats()'ın tümü (assoc). curl/uptime-kontrolü/kendi dashboard'un için.
 // Kullanım: route("GET", "/monitor.json", function() { response::json(monitor_json()) })
 function monitor_json() {
-    return runtime::stats();
+    $s = runtime::stats();
+    _mon_require($s);   // fail-loud: eski runtime → net hata
+    return $s;
 }
 
 // monitor_mount($prefix, $middlewares) → OPSİYONEL yardımcı. /metrics + /monitor.json'ı $prefix

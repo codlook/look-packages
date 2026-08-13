@@ -1,13 +1,45 @@
-# monitor paketi — biçim testi (CLI, use ile). Prometheus tip doğruluğu + JSON alanları.
+# monitor paketi guard — Prometheus çıktısında TÜM beklenen metrikler VAR MI + doğru tip.
+# ASIL RİSK: runtime::stats bir alanı yeniden adlandırırsa paket sessizce EKSİK metrik verir
+# (Grafana grafiği boş kalır — kimse fark etmez). Bu test her metrik adını + tipini kilitler.
+# Pozitif kontrol: monitor.lk'de bir _mon_metric satırını sil → ilgili "OK var" FAIL'e döner.
+# Çalıştır (paket dizininden):  lk test_monitor.lk
 use "monitor.lk"
 use string
 
-$p = monitor_prometheus()
-# counter'lar 'counter', gauge'lar 'gauge' tiplemeli (Grafana rate() için kritik)
-print(string::contains($p, "# TYPE look_requests_total counter") ? "OK counter-tip" : "FAIL counter-tip")
-print(string::contains($p, "# TYPE look_db_pool_busy gauge") ? "OK gauge-tip" : "FAIL gauge-tip")
-print(string::contains($p, "# HELP look_errors_5xx_total") ? "OK help-satiri" : "FAIL help-satiri")
+$fail = 0
+function chk($ad, $ok) {
+    if ($ok) { print("  OK   " . $ad); return 0 }
+    print("  FAIL " . $ad); return 1
+}
 
+$p = monitor_prometheus()
+
+# ── 11 metrik adı + değeri (name<boşluk><sayı> satırı olmalı; eksik alan → "name " boş kalır) ──
+$metrics = [
+    "look_requests_total", "look_errors_5xx_total", "look_vm_disabled_routes_total",
+    "look_uptime_seconds", "look_route_count", "look_working_mb", "look_private_mb",
+    "look_latency_last_microseconds", "look_latency_avg_microseconds",
+    "look_db_pool_size", "look_db_pool_busy"
+]
+for ($i = 0; $i < count($metrics); $i = $i + 1) {
+    $m = $metrics[$i]
+    # "# TYPE <m> " satırı + "<m> <rakam>" değer satırı ikisi de olmalı
+    $has_type  = string::contains($p, "# TYPE " . $m . " ")
+    $has_value = string::contains($p, "\n" . $m . " ") || string::starts_with($p, $m . " ")
+    $fail = $fail + chk($m . " (type+value)", $has_type && $has_value)
+}
+
+# ── counter/gauge tip doğruluğu (Grafana rate() için KRİTİK) ──
+$fail = $fail + chk("counter: requests_total",  string::contains($p, "# TYPE look_requests_total counter"))
+$fail = $fail + chk("counter: errors_5xx_total", string::contains($p, "# TYPE look_errors_5xx_total counter"))
+$fail = $fail + chk("counter: vm_disabled_routes", string::contains($p, "# TYPE look_vm_disabled_routes_total counter"))
+$fail = $fail + chk("gauge: db_pool_busy",       string::contains($p, "# TYPE look_db_pool_busy gauge"))
+$fail = $fail + chk("gauge: latency_avg",        string::contains($p, "# TYPE look_latency_avg_microseconds gauge"))
+
+# ── JSON çıktısı runtime::stats alanlarını taşıyor mu ──
 $j = monitor_json()
-print($j["request_count"] != null ? "OK json-request_count" : "FAIL json")
-print($j["vm_disabled_routes"] != null ? "OK json-vm_disabled_routes" : "FAIL json")
+$fail = $fail + chk("json: request_count",      $j["request_count"] != null)
+$fail = $fail + chk("json: db_pool_busy",       $j["db_pool_busy"] != null)
+
+if ($fail == 0) { print("PASS: monitor paketi (11 metrik + tip + json)") }
+else { print("FAIL: monitor paketi — " . $fail . " sorun"); exit(1) }

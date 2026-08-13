@@ -1,1 +1,68 @@
+// monitor — LOOK runtime gözlemlenebilirlik paketi (② sunum katmanı).
+// runtime::stats()'ı Prometheus ve JSON'a formatlar. Sayaçların KENDİSİ çekirdekte (runtime::stats);
+// bu paket YALNIZ formatlar — yeni ölçüm yok. Kur: lk install github.com/codlook/look-packages/monitor
+//
+// GÜVENLİ VARSAYILAN: bu paketi `use` etmek HİÇBİR route açmaz. Endpoint'i açıkça sen kaydedersin
+// (monitor_mount ya da elle route()). Böylece kimse farkında olmadan /metrics'i dışarı açmaz.
+//
+// KRİTİK: Prometheus counter vs gauge ayrımı DOĞRU yapılır (yanlış tip → Grafana rate() sessizce bozulur):
+//   counter (monoton artan): request_count, errors_5xx, vm_disabled_routes
+//   gauge   (anlık değer):   uptime, route_count, *_mb, latency_*, db_pool_*
+use runtime;
+use string;
+use json;
 
+// ── İç yardımcı: tek Prometheus metrik bloğu (HELP + TYPE + değer) ────────────
+function _mon_metric($name, $type, $help, $value) {
+    return "# HELP " . $name . " " . $help . "\n"
+         . "# TYPE " . $name . " " . $type . "\n"
+         . $name . " " . $value . "\n";
+}
+
+// monitor_prometheus() → Prometheus text-exposition formatı (string).
+// Kullanım: route("GET", "/metrics", function() { response::text(monitor_prometheus()) })
+function monitor_prometheus() {
+    $s = runtime::stats();
+    $out = "";
+    // ── counter'lar (_total soneki Prometheus konvansiyonu) ──
+    $out = $out . _mon_metric("look_requests_total", "counter",
+        "Total HTTP requests handled by this process.", $s["request_count"]);
+    $out = $out . _mon_metric("look_errors_5xx_total", "counter",
+        "Total 5xx responses served.", $s["errors_5xx"]);
+    $out = $out . _mon_metric("look_vm_disabled_routes_total", "counter",
+        "Distinct routes permanently fell back from VM to interpreter (>0 = VM bug).", $s["vm_disabled_routes"]);
+    // ── gauge'lar (anlık) ──
+    $out = $out . _mon_metric("look_uptime_seconds", "gauge",
+        "Process uptime in seconds.", $s["uptime_sec"]);
+    $out = $out . _mon_metric("look_route_count", "gauge",
+        "Number of registered routes.", $s["route_count"]);
+    $out = $out . _mon_metric("look_working_mb", "gauge",
+        "Resident set size (MB).", $s["working_mb"]);
+    $out = $out . _mon_metric("look_private_mb", "gauge",
+        "Private resident memory (MB).", $s["private_mb"]);
+    $out = $out . _mon_metric("look_latency_last_microseconds", "gauge",
+        "Dispatch time of the most recent request (us).", $s["latency_last_us"]);
+    $out = $out . _mon_metric("look_latency_avg_microseconds", "gauge",
+        "Average dispatch time across all requests (us).", $s["latency_avg_us"]);
+    $out = $out . _mon_metric("look_db_pool_size", "gauge",
+        "Total DB connections across all pools.", $s["db_pool_size"]);
+    $out = $out . _mon_metric("look_db_pool_busy", "gauge",
+        "Checked-out (in-use) DB connections.", $s["db_pool_busy"]);
+    return $out;
+}
+
+// monitor_json() → runtime::stats()'ın tümü (assoc). curl/uptime-kontrolü/kendi dashboard'un için.
+// Kullanım: route("GET", "/monitor.json", function() { response::json(monitor_json()) })
+function monitor_json() {
+    return runtime::stats();
+}
+
+// monitor_mount($prefix, $middlewares) → OPSİYONEL yardımcı. /metrics + /monitor.json'ı $prefix
+// altında route::group ile kaydeder. Açıkça çağırılmadıkça hiçbir şey açılmaz (güvenli varsayılan).
+// Üretimde auth middleware geçir:  monitor_mount("/monitor", [$adminOnly])
+function monitor_mount($prefix, $middlewares) {
+    route::group($prefix, $middlewares, function() {
+        route("GET", "/metrics",      function() { response::text(monitor_prometheus()) });
+        route("GET", "/monitor.json", function() { response::json(monitor_json()) });
+    });
+}

@@ -1,0 +1,9 @@
+{
+  "description": "Firebase integration — Firestore CRUD, Authentication (email/password, token verification) and Realtime Database. Access Google Firebase services directly from LOOK.",
+  "tags": ["firebase", "database", "auth", "google"],
+  "icon": "🔥",
+  "color": "orange",
+  "use": "use \"pkg/firebase\"",
+  "version": "1.0.0",
+  "author": "codlook"
+}

@@ -1,0 +1,9 @@
+{
+  "description": "iyzico payment integration for Turkish e-commerce — payment creation, 3D Secure flow, refund and cancellation, HMAC request signing. Drops straight into a checkout route.",
+  "tags": ["payment", "iyzico", "ecommerce", "3dsecure"],
+  "icon": "💳",
+  "color": "green",
+  "use": "use \"pkg/iyzico\"",
+  "version": "1.0.0",
+  "author": "codlook"
+}

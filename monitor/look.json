@@ -1,0 +1,9 @@
+{
+  "description": "Runtime observability — formats runtime::stats() into Prometheus (/metrics) and JSON, with correct counter/gauge typing so Grafana rate() works. Reads the core counters. Safe-by-default: importing it registers no routes on its own.",
+  "tags": ["monitoring", "observability", "prometheus", "metrics"],
+  "icon": "📊",
+  "color": "blue",
+  "use": "use \"monitor/monitor.lk\"",
+  "version": "1.0.0",
+  "author": "codlook"
+}

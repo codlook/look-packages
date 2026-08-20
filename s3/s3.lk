@@ -1,0 +1,108 @@
+use http;
+use crypto;
+use string;
+use date;
+
+// s3 — S3-compatible object storage with AWS Signature V4, pure LOOK on http:: and
+// crypto::. Works with AWS S3, MinIO, Cloudflare R2, Backblaze B2 — any endpoint
+// that speaks the S3 API. Path-style addressing (endpoint/bucket/key), which every
+// S3-compatible server accepts.
+//
+// A config ($cfg) is an assoc:
+//   ["endpoint"=>"https://s3.amazonaws.com"  (or "http://127.0.0.1:9000" for MinIO),
+//    "region"=>"us-east-1", "access_key"=>.., "secret_key"=>.., "bucket"=>..]
+//
+// s3_put($cfg, $key, $content, $content_type) -> int    HTTP status (200 on success)
+// s3_get($cfg, $key)                          -> assoc  {status, body}
+// s3_delete($cfg, $key)                       -> int    HTTP status (204 on success)
+// s3_url($cfg, $key)                          -> string path-style object URL
+//
+// NOTE: the signing clock must be UTC (SigV4 allows a ~15 min skew). Servers should
+// run UTC; the amz-date is taken from date::now().
+
+// Host[:port] of an endpoint URL (scheme stripped, path dropped).
+function s3__host($endpoint) {
+    $h = $endpoint;
+    if (string::starts_with($h, "https://")) { $h = string::substr($h, 8); }
+    if (string::starts_with($h, "http://"))  { $h = string::substr($h, 7); }
+    $slash = string::index_of($h, "/");
+    if ($slash >= 0) { $h = string::substr($h, 0, $slash); }
+    return $h;
+}
+
+// date::now() "2026-08-20 18:32:36" -> ["20260820T183236Z", "20260820"]
+function s3__amzdate() {
+    $now = date::now();
+    $d = string::substr($now, 0, 10);      // 2026-08-20
+    $t = string::substr($now, 11, 8);      // 18:32:36
+    $d = string::replace($d, "-", "");     // 20260820
+    $t = string::replace($t, ":", "");     // 183236
+    return [$d . "T" . $t . "Z", $d];
+}
+
+// SigV4 signing key chain: HMAC(AWS4+secret, date) -> region -> service -> aws4_request.
+function s3__signing_key($secret, $date_stamp, $region) {
+    $k1 = crypto::hmac_sha256_raw($date_stamp, "AWS4" . $secret);
+    $k2 = crypto::hmac_sha256_raw($region, $k1);
+    $k3 = crypto::hmac_sha256_raw("s3", $k2);
+    return crypto::hmac_sha256_raw("aws4_request", $k3);
+}
+
+// Sign one request and return the Authorization header value.
+function s3__auth($cfg, $method, $canon_uri, $payload_hash, $amz_date, $date_stamp) {
+    $host = s3__host($cfg["endpoint"]);
+    $region = $cfg["region"];
+    $signed_headers = "host;x-amz-content-sha256;x-amz-date";
+    $canon_headers = "host:" . $host . "\n" .
+                     "x-amz-content-sha256:" . $payload_hash . "\n" .
+                     "x-amz-date:" . $amz_date . "\n";
+    $canon_request = $method . "\n" . $canon_uri . "\n" . "" . "\n" .
+                     $canon_headers . "\n" . $signed_headers . "\n" . $payload_hash;
+    $scope = $date_stamp . "/" . $region . "/s3/aws4_request";
+    $string_to_sign = "AWS4-HMAC-SHA256\n" . $amz_date . "\n" . $scope . "\n" .
+                      crypto::sha256($canon_request);
+    $key = s3__signing_key($cfg["secret_key"], $date_stamp, $region);
+    $signature = crypto::hmac_sha256($string_to_sign, $key);
+    return "AWS4-HMAC-SHA256 Credential=" . $cfg["access_key"] . "/" . $scope .
+           ", SignedHeaders=" . $signed_headers . ", Signature=" . $signature;
+}
+
+function s3_url($cfg, $key) {
+    return $cfg["endpoint"] . "/" . $cfg["bucket"] . "/" . $key;
+}
+
+function s3__send($cfg, $method, $key, $body, $content_type) {
+    $canon_uri = "/" . $cfg["bucket"] . "/" . $key;
+    $payload_hash = crypto::sha256($body);
+    $parts = s3__amzdate();
+    $amz_date = $parts[0];
+    $date_stamp = $parts[1];
+    $auth = s3__auth($cfg, $method, $canon_uri, $payload_hash, $amz_date, $date_stamp);
+    $headers = [
+        "Authorization" => $auth,
+        "x-amz-date" => $amz_date,
+        "x-amz-content-sha256" => $payload_hash
+    ];
+    if (string::len($content_type) > 0) {
+        $headers["Content-Type"] = $content_type;
+    }
+    $url = s3_url($cfg, $key);
+    if ($method == "PUT") { return http::put($url, $body, $headers); }
+    if ($method == "DELETE") { return http::delete($url, $headers); }
+    return http::get($url, $headers);
+}
+
+function s3_put($cfg, $key, $content, $content_type) {
+    $r = s3__send($cfg, "PUT", $key, $content, $content_type);
+    return $r["status"];
+}
+
+function s3_get($cfg, $key) {
+    $r = s3__send($cfg, "GET", $key, "", "");
+    return ["status" => $r["status"], "body" => $r["body"]];
+}
+
+function s3_delete($cfg, $key) {
+    $r = s3__send($cfg, "DELETE", $key, "", "");
+    return $r["status"];
+}

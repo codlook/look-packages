@@ -1,0 +1,9 @@
+{
+  "description": "S3-compatible object storage with AWS Signature V4, pure http:: + crypto:: — put/get/delete against AWS S3, MinIO, Cloudflare R2 or Backblaze B2. Verified against a real MinIO server.",
+  "tags": ["storage", "s3", "aws", "files"],
+  "icon": "🪣",
+  "color": "orange",
+  "use": "use \"pkg/s3\"",
+  "version": "1.0.0",
+  "author": "codlook"
+}

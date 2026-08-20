@@ -1,0 +1,9 @@
+{
+  "description": "Send errors to Sentry (or any Sentry-compatible ingest) — parse a DSN, build the store endpoint and auth header, post an event. Call from a catch block. Pure http:: + json::.",
+  "tags": ["monitoring", "errors", "sentry", "observability"],
+  "icon": "🚨",
+  "color": "navy",
+  "use": "use \"pkg/sentry\"",
+  "version": "1.0.0",
+  "author": "codlook"
+}

@@ -1,0 +1,50 @@
+use http;
+use json;
+use string;
+
+// sentry — send errors to Sentry (or any Sentry-compatible ingest) from LOOK, pure
+// http:: + json::. Parses a DSN, builds the store endpoint and auth header, and
+// posts a minimal event. Call it from a catch block or an error hook.
+//
+// sentry_capture($dsn, $message, $level) -> int   HTTP status (200 on success)
+// sentry_capture_exception($dsn, $error) -> int   convenience: level "error"
+//
+// A DSN looks like: https://PUBLIC_KEY@HOST/PROJECT_ID
+// Levels: "fatal" "error" "warning" "info" "debug".
+
+// Parse "https://KEY@HOST/PROJECT" -> ["key"=>.., "host"=>.., "project"=>.., "scheme"=>..]
+function sentry__parse_dsn($dsn) {
+    $scheme = "https";
+    $rest = $dsn;
+    if (string::starts_with($rest, "https://")) { $rest = string::substr($rest, 8); }
+    else { if (string::starts_with($rest, "http://")) { $scheme = "http"; $rest = string::substr($rest, 7); } }
+    $at = string::index_of($rest, "@");
+    $key = string::substr($rest, 0, $at);
+    $after = string::substr($rest, $at + 1);
+    $slash = string::index_of($after, "/");
+    $host = string::substr($after, 0, $slash);
+    $project = string::substr($after, $slash + 1);
+    return ["scheme" => $scheme, "key" => $key, "host" => $host, "project" => $project];
+}
+
+function sentry_capture($dsn, $message, $level) {
+    $d = sentry__parse_dsn($dsn);
+    $url = $d["scheme"] . "://" . $d["host"] . "/api/" . $d["project"] . "/store/";
+    $event = [
+        "message" => $message,
+        "level" => $level,
+        "platform" => "other",
+        "logger" => "look"
+    ];
+    $auth = "Sentry sentry_version=7, sentry_client=look/1.0, sentry_key=" . $d["key"];
+    $headers = [
+        "Content-Type" => "application/json",
+        "X-Sentry-Auth" => $auth
+    ];
+    $r = http::post($url, json::encode($event), $headers);
+    return $r["status"];
+}
+
+function sentry_capture_exception($dsn, $error) {
+    return sentry_capture($dsn, "" . $error, "error");
+}

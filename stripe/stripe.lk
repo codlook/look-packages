@@ -1,0 +1,71 @@
+use http;
+use json;
+use string;
+
+// stripe — Stripe payments for LOOK, pure http:: + json::. Thin, honest wrapper:
+// form-encoded POST/GET to the Stripe REST API with your secret key as a bearer
+// token, responses parsed as assoc. Verify inbound webhooks with the separate
+// `webhook` module (webhook_verify_stripe).
+//
+// stripe_request($sk, $method, $path, $params) -> assoc  generic API call
+// stripe_create_payment_intent($sk, $amount, $currency) -> assoc
+// stripe_create_customer($sk, $email)                   -> assoc
+// stripe_create_checkout_session($sk, $params)          -> assoc
+// stripe_retrieve($sk, $path)                           -> assoc  GET any resource
+//
+// $amount is in the smallest currency unit (cents/kuruş) — pairs with the `money`
+// module. The API base is env STRIPE_API_BASE (default https://api.stripe.com), so
+// you can point at Stripe-compatible gateways or a mock.
+
+function stripe__enc($s) {
+    $e = string::replace("" . $s, "%", "%25");
+    $e = string::replace($e, " ", "%20");
+    $e = string::replace($e, "&", "%26");
+    $e = string::replace($e, "=", "%3D");
+    $e = string::replace($e, "+", "%2B");
+    $e = string::replace($e, "/", "%2F");
+    $e = string::replace($e, ":", "%3A");
+    $e = string::replace($e, "@", "%40");
+    return $e;
+}
+
+// Flat form encoding. For nested params use bracket keys, e.g.
+// "line_items[0][price]" => "price_123".
+function stripe__form($params) {
+    $out = "";
+    $first = true;
+    foreach ($params as $k => $v) {
+        if (!$first) { $out = $out . "&"; }
+        $out = $out . stripe__enc("" . $k) . "=" . stripe__enc("" . $v);
+        $first = false;
+    }
+    return $out;
+}
+
+function stripe_request($sk, $method, $path, $params) {
+    $base = env("STRIPE_API_BASE", "https://api.stripe.com");
+    $url = $base . $path;
+    $headers = ["Authorization" => "Bearer " . $sk, "Content-Type" => "application/x-www-form-urlencoded"];
+    if ($method == "GET") {
+        $g = http::get($url, $headers);
+        return json::decode($g["body"]);
+    }
+    $p = http::post($url, stripe__form($params), $headers);
+    return json::decode($p["body"]);
+}
+
+function stripe_create_payment_intent($sk, $amount, $currency) {
+    return stripe_request($sk, "POST", "/v1/payment_intents", ["amount" => "" . $amount, "currency" => $currency]);
+}
+
+function stripe_create_customer($sk, $email) {
+    return stripe_request($sk, "POST", "/v1/customers", ["email" => $email]);
+}
+
+function stripe_create_checkout_session($sk, $params) {
+    return stripe_request($sk, "POST", "/v1/checkout/sessions", $params);
+}
+
+function stripe_retrieve($sk, $path) {
+    return stripe_request($sk, "GET", $path, []);
+}

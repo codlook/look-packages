@@ -1,0 +1,9 @@
+{
+  "description": "Stripe payments — payment intents, customers and checkout sessions over the Stripe REST API with a bearer key. Amounts in minor units (pairs with money); verify webhooks with the webhook module.",
+  "tags": ["payment", "stripe", "ecommerce", "checkout"],
+  "icon": "💳",
+  "color": "navy",
+  "use": "use \"pkg/stripe\"",
+  "version": "1.0.0",
+  "author": "codlook"
+}

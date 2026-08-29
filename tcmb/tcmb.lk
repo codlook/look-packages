@@ -1,0 +1,117 @@
+use string;
+use array;
+use type;
+use http;
+
+// tcmb — Turkish Central Bank (TCMB) daily foreign-exchange rates, pure LOOK.
+// Reads the bank's public, keyless bulletin (today.xml) over HTTPS and parses its
+// fixed schema with a single regex pass — no API key, no account, no dependency.
+// The rates every Turkish invoice, price list or checkout needs, from the source.
+//
+//   tcmb_rates()                     -> assoc code -> record | null   (all currencies)
+//   tcmb_rate($code)                 -> TRY selling price of 1 unit of $code (float) | -1
+//   tcmb_buy($code)                  -> TRY buying price of 1 unit of $code (float) | -1
+//   tcmb_convert($amount,$from,$to)  -> $amount converted through TRY (float) | -1
+//   tcmb_date()                      -> bulletin date "DD.MM.YYYY" | ""
+//
+// Each record: {unit, name, buying, selling, banknote_buying, banknote_selling}.
+// Values are TRY per `unit` of the currency; most units are 1, a few (historically
+// JPY) are 100 — the tcmb_rate/tcmb_buy helpers already divide by unit for you.
+// The bulletin is published once per weekday; on weekends/holidays TCMB serves the
+// last working day's rates. Codes are ISO 4217 (USD, EUR, GBP, …); "TRY"/"TL" = 1.
+
+function tcmb__fetch() {
+    $res = http::get("https://www.tcmb.gov.tr/kurlar/today.xml",
+                     ["User-Agent" => "LOOK-tcmb/1.0"],
+                     ["timeout" => 10000]);
+    if ($res == null) { return null; }
+    if ($res["error"] != null) { return null; }
+    if ($res["status"] != 200) { return null; }
+    return $res["body"];
+}
+
+function tcmb__f($s) {
+    if ($s == "") { return 0.0; }
+    return type::to_float($s);
+}
+
+// inner text of a single <Tag>…</Tag> within a currency block, or "" if absent.
+// Two-tier parse (block, then field) so a currency missing a field — e.g. XDR/SDR
+// carries no Banknote* tags — is still captured, and no field leaks in from the next.
+function tcmb__tag($block, $tag) {
+    $m = string::regex_match_all($block, "<" . $tag . ">([^<]*)</" . $tag . ">");
+    if (count($m) == 0) { return ""; }
+    return $m[0][1];
+}
+
+// parse the fixed-schema bulletin into an assoc keyed by currency code
+function tcmb__parse($xml) {
+    $blocks = string::regex_match_all($xml, "<Currency[^>]*Kod=\"([A-Z]+)\"([\\s\\S]*?)</Currency>");
+    $out = array::new_assoc();
+    $i = 0;
+    while ($i < count($blocks)) {
+        $code = $blocks[$i][1];
+        $b = $blocks[$i][2];
+        $rec = array::new_assoc();
+        $rec["unit"] = type::to_int(tcmb__tag($b, "Unit"));
+        $rec["name"] = string::trim(tcmb__tag($b, "CurrencyName"));
+        $rec["buying"] = tcmb__f(tcmb__tag($b, "ForexBuying"));
+        $rec["selling"] = tcmb__f(tcmb__tag($b, "ForexSelling"));
+        $rec["banknote_buying"] = tcmb__f(tcmb__tag($b, "BanknoteBuying"));
+        $rec["banknote_selling"] = tcmb__f(tcmb__tag($b, "BanknoteSelling"));
+        $out[$code] = $rec;
+        $i = $i + 1;
+    }
+    return $out;
+}
+
+// tcmb_rates() -> assoc code -> {unit,name,buying,selling,banknote_buying,banknote_selling} | null
+function tcmb_rates() {
+    $xml = tcmb__fetch();
+    if ($xml == null) { return null; }
+    return tcmb__parse($xml);
+}
+
+// tcmb_date() -> "DD.MM.YYYY" bulletin date, or "" on failure
+function tcmb_date() {
+    $xml = tcmb__fetch();
+    if ($xml == null) { return ""; }
+    $m = string::regex_match_all($xml, "Tarih=\"([0-9.]+)\"");
+    if (count($m) == 0) { return ""; }
+    return $m[0][1];
+}
+
+// TRY value of one unit of $code, from an already-fetched rates assoc; -1 if absent
+function tcmb__unit($rates, $code, $field) {
+    $c = string::upper($code);
+    if ($c == "TRY" || $c == "TL") { return 1.0; }
+    if (!array::contains(array::keys($rates), $c)) { return 0 - 1; }
+    $r = $rates[$c];
+    $u = $r["unit"];
+    if ($u == 0) { return $r[$field]; }
+    return $r[$field] / $u;
+}
+
+// tcmb_rate($code) -> TRY selling price of 1 unit of $code, or -1
+function tcmb_rate($code) {
+    $rates = tcmb_rates();
+    if ($rates == null) { return 0 - 1; }
+    return tcmb__unit($rates, $code, "selling");
+}
+
+// tcmb_buy($code) -> TRY buying price of 1 unit of $code, or -1
+function tcmb_buy($code) {
+    $rates = tcmb_rates();
+    if ($rates == null) { return 0 - 1; }
+    return tcmb__unit($rates, $code, "buying");
+}
+
+// tcmb_convert($amount, $from, $to) -> $amount converted through TRY (selling), or -1
+function tcmb_convert($amount, $from, $to) {
+    $rates = tcmb_rates();
+    if ($rates == null) { return 0 - 1; }
+    $f = tcmb__unit($rates, $from, "selling");
+    $t = tcmb__unit($rates, $to, "selling");
+    if ($f < 0 || $t <= 0) { return 0 - 1; }
+    return $amount * $f / $t;
+}

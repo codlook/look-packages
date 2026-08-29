@@ -1,0 +1,9 @@
+{
+  "description": "Turkish Central Bank (TCMB) daily exchange rates — pure LOOK, no API key and no account. Reads the bank's public keyless bulletin (today.xml) over HTTPS and parses it in a single pass: every currency with buying / selling / banknote rates, a per-unit rate helper and a convert() through TRY. Verified field-for-field (22 currencies) against a reference XML parser.",
+  "tags": ["tcmb", "exchange-rates", "currency", "turkey", "forex"],
+  "icon": "💱",
+  "color": "green",
+  "use": "use \"pkg/tcmb\"",
+  "version": "1.0.0",
+  "author": "codlook"
+}

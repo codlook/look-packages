@@ -1,0 +1,25 @@
+// example.lk — using the tcmb package.  Run it:  lk example.lk
+
+use "pkg/tcmb/tcmb.lk"
+use string
+
+// 1. Headline rates — TRY selling price of one unit of a currency.
+print("1 USD = " . tcmb_rate("USD") . " TRY")
+print("1 EUR = " . tcmb_rate("EUR") . " TRY")
+print("bulletin date: " . tcmb_date())
+
+// 2. Convert between any two currencies — the amount flows through TRY.
+print("100 USD  = " . tcmb_convert(100, "USD", "EUR") . " EUR")
+print("2500 TRY = " . tcmb_convert(2500, "TRY", "USD") . " USD")
+
+// 3. All rates at once (a single fetch) — the right call for an invoice or price list.
+$rates = tcmb_rates()
+$usd = $rates["USD"]
+print("USD  buying=" . $usd["buying"] . "  selling=" . $usd["selling"] . "  name=" . $usd["name"])
+
+// 4. Serve it live from a route (uncomment inside an lk-fcgi app):
+//
+//   route("GET", "/kur/{code}", function() {
+//       $code = request::param("code")
+//       response::json(["code" => code, "try" => tcmb_rate($code), "date" => tcmb_date()])
+//   })

@@ -1,0 +1,9 @@
+{
+  "description": "Excel (.xlsx) reader and writer — pure LOOK, no native code and no external service. Reads and writes genuine Office Open XML workbooks: writes stored ZIPs (CRC32), and reads both stored and DEFLATE-compressed files (carries its own RFC-1951 inflate), so it round-trips its own output and opens spreadsheets made by Excel/Sheets/LibreOffice. Multiple sheets, real number cells, UTF-8/Turkish. Verified against openpyxl.",
+  "tags": ["xlsx", "excel", "spreadsheet", "export"],
+  "icon": "📊",
+  "color": "green",
+  "use": "use \"pkg/xlsx\"",
+  "version": "1.0.0",
+  "author": "codlook"
+}

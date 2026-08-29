@@ -1,0 +1,25 @@
+// example.lk — using the validate-tr package.  Run it:  lk example.lk
+
+use "pkg/validate-tr/validate-tr.lk"
+
+// TC Kimlik No (official checksum)
+print("TC 10000000146 : " . tckn_valid("10000000146"));   // 1
+print("TC 11111111111 : " . tckn_valid("11111111111"));   // 0
+
+// IBAN (mod-97; spaces are fine)
+print("IBAN valid  : " . iban_valid("TR33 0006 1005 1978 6457 8413 26"));  // 1
+print("IBAN broken : " . iban_valid("TR00 0006 1005 1978 6457 8413 26"));  // 0
+
+// Mobile number — accepts +90 / 0 / bare, normalizes to 10 digits
+$gsm = "0530 123 45 67";
+if (gsm_valid($gsm)) {
+    print("GSM ok, normalized: " . gsm_normalize($gsm));   // 5301234567
+}
+
+// Licence plate (province 01-81 + letters + digits)
+print("Plate 34 ABC 123 : " . plate_valid("34 ABC 123"));  // 1
+print("Plate 82 AB 12   : " . plate_valid("82 AB 12"));     // 0 (province out of range)
+
+// In a form handler:
+//   if (!tckn_valid(request::post("tc")))   { ...reject... }
+//   if (!iban_valid(request::post("iban")))  { ...reject... }

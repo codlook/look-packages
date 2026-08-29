@@ -1,0 +1,32 @@
+// example.lk — using the qr package.  Run it:  lk example.lk
+
+use "pkg/qr/qr.lk"
+
+// 1. The easy way — text or URL in, SVG out.
+file::put("menu.svg", qr("https://qrmenu.codlook.com/menu/42"));
+
+// 2. With control — ECC level ("L"/"M"/"Q"/"H") and styling.
+file::put("menu-styled.svg", qr_svg("https://qrmenu.codlook.com/menu/42", "H", [
+    "scale" => 12,
+    "dark"  => "#1a1a2e"
+]));
+
+// 3. Exact pixel size — width/height. The SVG scales to fit and stays crisp (vector).
+file::put("menu-200.svg", qr_svg("https://qrmenu.codlook.com/menu/42", "M", [
+    "width"  => 200,
+    "height" => 200
+]));
+
+print("wrote menu.svg, menu-styled.svg and menu-200.svg — open or scan them");
+
+// 4. Grab the SVG as a plain string — assign it, print it, return it from a route,
+//    log it, inline it into a page… it is just text.
+$ornekQr = qr("https://qrmenu.codlook.com/menu/42");
+print($ornekQr);
+
+// 5. Serve it live from a route (uncomment inside an lk-fcgi app):
+//
+//   route("GET", "/qr/{id}", function() {
+//       response::header("Content-Type", "image/svg+xml")
+//       response::text(qr("https://qrmenu.codlook.com/menu/" . request::param("id")))
+//   })

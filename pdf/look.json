@@ -1,0 +1,9 @@
+{
+  "description": "PDF generator — pure LOOK, no native code and no external service. A document builder with multi-page flow, automatic word-wrap, alignment, colors and tables, plus low-level text/line/rect ops and drop-in QR/barcode helpers. Turkish-safe (Differences encoding), real font metrics for accurate layout, ASCII output. Made for invoices, reports, receipts and labels. Verified against pypdf.",
+  "tags": ["pdf", "receipt", "label", "report"],
+  "icon": "📄",
+  "color": "navy",
+  "use": "use \"pkg/pdf\"",
+  "version": "1.0.0",
+  "author": "codlook"
+}

@@ -1,0 +1,706 @@
+use array;
+use string;
+use crypto;
+use type;
+use date;
+use math;
+
+// xlsx — real .xlsx (Excel) reader/writer for LOOK, pure LOOK (no native code, no service).
+// It builds and parses genuine Office Open XML spreadsheets: a ZIP of the standard XML parts.
+// Writes stored (CRC32) entries; reads BOTH stored and DEFLATE-compressed files — so it round-
+// trips its own output AND opens spreadsheets made by Excel / Google Sheets / LibreOffice
+// (it carries its own RFC-1951 inflate). UTF-8 throughout, so Turkish and any text work.
+//
+//   xlsx($rows)                 -> string(binary)   write one sheet ("Sheet1") from rows
+//   xlsx_book($sheets)          -> string(binary)   write many: [["name"=>.., "rows"=>..], ..]
+//   xlsx_read($binary)          -> array            read: [["name"=>.., "rows"=>..], ..]
+//
+// A row is an array of cells. On write, an integer/float cell becomes a real number cell,
+// anything else text. On read, number cells come back as int/float, everything else as text.
+// Update = read, change the rows, write again. Read files with file::read, write with file::put.
+
+// ── hex / byte helpers ──────────────────────────────────────────────────────────
+function xlsx__nib($n) {
+    if ($n < 10) { return "" . $n; }
+    if ($n == 10) { return "a"; } if ($n == 11) { return "b"; } if ($n == 12) { return "c"; }
+    if ($n == 13) { return "d"; } if ($n == 14) { return "e"; }
+    return "f";
+}
+function xlsx__byte($n) {
+    return xlsx__nib(($n >> 4) & 15) . xlsx__nib($n & 15);
+}
+function xlsx__le16($n) {
+    return xlsx__byte($n & 255) . xlsx__byte(($n >> 8) & 255);
+}
+function xlsx__le32($n) {
+    return xlsx__byte($n & 255) . xlsx__byte(($n >> 8) & 255) . xlsx__byte(($n >> 16) & 255) . xlsx__byte(($n >> 24) & 255);
+}
+// bytes of a string (UTF-8) as an array of ints, and its byte length
+function xlsx__bytes($str) {
+    $hex = crypto::hex_encode($str);
+    $out = [];
+    $i = 0;
+    $n = string::len($hex);
+    while ($i < $n) {
+        $out = array::push($out, xlsx__hx2(string::substr($hex, $i, 2)));
+        $i = $i + 2;
+    }
+    return $out;
+}
+function xlsx__hxv($ch) {
+    if ($ch == "0") { return 0; } if ($ch == "1") { return 1; } if ($ch == "2") { return 2; }
+    if ($ch == "3") { return 3; } if ($ch == "4") { return 4; } if ($ch == "5") { return 5; }
+    if ($ch == "6") { return 6; } if ($ch == "7") { return 7; } if ($ch == "8") { return 8; }
+    if ($ch == "9") { return 9; } if ($ch == "a") { return 10; } if ($ch == "b") { return 11; }
+    if ($ch == "c") { return 12; } if ($ch == "d") { return 13; } if ($ch == "e") { return 14; }
+    return 15;
+}
+function xlsx__hx2($pair) {
+    return xlsx__hxv(string::substr($pair, 0, 1)) * 16 + xlsx__hxv(string::substr($pair, 1, 1));
+}
+
+// ── CRC-32 (IEEE, reflected, poly 0xEDB88320) ────────────────────────────────────
+function xlsx__crc_step($c) {
+    $k = 0;
+    while ($k < 8) {
+        if (($c & 1) == 1) { $c = 0xEDB88320 ^ ($c >> 1); }
+        else { $c = $c >> 1; }
+        $k = $k + 1;
+    }
+    return $c;
+}
+function xlsx__crc32($bytes) {
+    $crc = 0xFFFFFFFF;
+    $i = 0;
+    $n = count($bytes);
+    while ($i < $n) {
+        $crc = xlsx__crc_step(($crc ^ $bytes[$i]) & 255) ^ ($crc >> 8);
+        $i = $i + 1;
+    }
+    return $crc ^ 0xFFFFFFFF;
+}
+
+// ── XML escaping + cell building ─────────────────────────────────────────────────
+function xlsx__xesc($s) {
+    $s = string::replace("" . $s, "&", "&amp;");
+    $s = string::replace($s, "<", "&lt;");
+    $s = string::replace($s, ">", "&gt;");
+    return $s;
+}
+function xlsx__collet($n) {
+    // 1 -> A, 26 -> Z, 27 -> AA
+    $s = "";
+    while ($n > 0) {
+        $r = ($n - 1) % 26;
+        $s = string::substr("ABCDEFGHIJKLMNOPQRSTUVWXYZ", $r, 1) . $s;
+        $n = ($n - $r - 1) / 26;
+    }
+    return $s;
+}
+function xlsx__is_number($v) {
+    return (type::is_int($v) || type::is_float($v));
+}
+function xlsx__sheet_xml($rows) {
+    $x = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>";
+    $x = $x . "<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><sheetData>";
+    $ri = 0;
+    while ($ri < count($rows)) {
+        $row = $rows[$ri];
+        $x = $x . "<row r=\"" . ($ri + 1) . "\">";
+        $ci = 0;
+        while ($ci < count($row)) {
+            $ref = xlsx__collet($ci + 1) . ($ri + 1);
+            $cell = $row[$ci];
+            if (xlsx__is_number($cell)) {
+                $x = $x . "<c r=\"" . $ref . "\"><v>" . $cell . "</v></c>";
+            } else {
+                $x = $x . "<c r=\"" . $ref . "\" t=\"inlineStr\"><is><t xml:space=\"preserve\">" . xlsx__xesc($cell) . "</t></is></c>";
+            }
+            $ci = $ci + 1;
+        }
+        $x = $x . "</row>";
+        $ri = $ri + 1;
+    }
+    return $x . "</sheetData></worksheet>";
+}
+
+// ── ZIP (store) assembly ─────────────────────────────────────────────────────────
+// append one stored entry; returns [updated body_hex, central_dir_entry_hex]
+function xlsx__entry($name, $data, $offset) {
+    $bytes = xlsx__bytes($data);
+    $crc = xlsx__crc32($bytes);
+    $sz = count($bytes);
+    $namehex = crypto::hex_encode($name);
+    $nlen = string::len($name);
+    $datahex = crypto::hex_encode($data);
+    // local file header
+    $lh = "504b0304" . "1400" . "0000" . "0000" . "0000" . "0000";
+    $lh = $lh . xlsx__le32($crc) . xlsx__le32($sz) . xlsx__le32($sz) . xlsx__le16($nlen) . "0000";
+    $lh = $lh . $namehex . $datahex;
+    // central directory entry
+    $cd = "504b0102" . "1400" . "1400" . "0000" . "0000" . "0000" . "0000";
+    $cd = $cd . xlsx__le32($crc) . xlsx__le32($sz) . xlsx__le32($sz) . xlsx__le16($nlen);
+    $cd = $cd . "0000" . "0000" . "0000" . "0000" . "00000000" . xlsx__le32($offset) . $namehex;
+    return [$lh, $cd];
+}
+function xlsx__zip($files) {
+    // $files: array of ["name"=>.., "data"=>..]
+    $body = "";
+    $cd = "";
+    $count = 0;
+    $i = 0;
+    while ($i < count($files)) {
+        $f = $files[$i];
+        $offset = string::len($body) / 2;
+        $e = xlsx__entry($f["name"], $f["data"], $offset);
+        $body = $body . $e[0];
+        $cd = $cd . $e[1];
+        $count = $count + 1;
+        $i = $i + 1;
+    }
+    $cdoff = string::len($body) / 2;
+    $cdsize = string::len($cd) / 2;
+    $eocd = "504b0506" . "0000" . "0000" . xlsx__le16($count) . xlsx__le16($count);
+    $eocd = $eocd . xlsx__le32($cdsize) . xlsx__le32($cdoff) . "0000";
+    return crypto::hex_decode($body . $cd . $eocd);
+}
+
+// ── workbook parts ───────────────────────────────────────────────────────────────
+function xlsx_book($sheets) {
+    $ns = count($sheets);
+    // [Content_Types].xml
+    $ct = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>";
+    $ct = $ct . "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">";
+    $ct = $ct . "<Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/>";
+    $ct = $ct . "<Default Extension=\"xml\" ContentType=\"application/xml\"/>";
+    $ct = $ct . "<Override PartName=\"/xl/workbook.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml\"/>";
+    $si = 0;
+    while ($si < $ns) {
+        $ct = $ct . "<Override PartName=\"/xl/worksheets/sheet" . ($si + 1) . ".xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml\"/>";
+        $si = $si + 1;
+    }
+    $ct = $ct . "</Types>";
+    // _rels/.rels
+    $rels = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"xl/workbook.xml\"/></Relationships>";
+    // xl/workbook.xml
+    $wb = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><workbook xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><sheets>";
+    $si = 0;
+    while ($si < $ns) {
+        $nm = xlsx__xesc($sheets[$si]["name"]);
+        $wb = $wb . "<sheet name=\"" . $nm . "\" sheetId=\"" . ($si + 1) . "\" r:id=\"rId" . ($si + 1) . "\"/>";
+        $si = $si + 1;
+    }
+    $wb = $wb . "</sheets></workbook>";
+    // xl/_rels/workbook.xml.rels
+    $wbr = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">";
+    $si = 0;
+    while ($si < $ns) {
+        $wbr = $wbr . "<Relationship Id=\"rId" . ($si + 1) . "\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet\" Target=\"worksheets/sheet" . ($si + 1) . ".xml\"/>";
+        $si = $si + 1;
+    }
+    $wbr = $wbr . "</Relationships>";
+    // assemble file list
+    $files = [];
+    $files = array::push($files, ["name" => "[Content_Types].xml", "data" => $ct]);
+    $files = array::push($files, ["name" => "_rels/.rels", "data" => $rels]);
+    $files = array::push($files, ["name" => "xl/workbook.xml", "data" => $wb]);
+    $files = array::push($files, ["name" => "xl/_rels/workbook.xml.rels", "data" => $wbr]);
+    $si = 0;
+    while ($si < $ns) {
+        $files = array::push($files, ["name" => "xl/worksheets/sheet" . ($si + 1) . ".xml", "data" => xlsx__sheet_xml($sheets[$si]["rows"])]);
+        $si = $si + 1;
+    }
+    return xlsx__zip($files);
+}
+
+// xlsx($rows) -> one-sheet workbook (the easy one-liner)
+function xlsx($rows) {
+    return xlsx_book([["name" => "Sheet1", "rows" => $rows]]);
+}
+
+// inflate — RFC 1951 raw DEFLATE decompressor in pure LOOK (puff-style Huffman decode).
+//   inflate($bytes, $outsize) -> array of decoded byte ints
+// $bytes: array of compressed byte ints. $outsize: expected uncompressed size (from the ZIP).
+
+function inf__zeros($n) {
+    $a = [0];
+    while (count($a) < $n) { $a = array::flatten([$a, $a]); }
+    return array::slice($a, 0, $n);
+}
+// length base/extra for symbols 257..285
+function inf__lenbase() { return [3,4,5,6,7,8,9,10,11,13,15,17,19,23,27,31,35,43,51,59,67,83,99,115,131,163,195,227,258]; }
+function inf__lenext()  { return [0,0,0,0,0,0,0,0,1,1,1,1,2,2,2,2,3,3,3,3,4,4,4,4,5,5,5,5,0]; }
+function inf__distbase(){ return [1,2,3,4,5,7,9,13,17,25,33,49,65,97,129,193,257,385,513,769,1025,1537,2049,3073,4097,6145,8193,12289,16385,24577]; }
+function inf__distext() { return [0,0,0,0,1,1,2,2,3,3,4,4,5,5,6,6,7,7,8,8,9,9,10,10,11,11,12,12,13,13]; }
+function inf__clorder() { return [16,17,18,0,8,7,9,6,10,5,11,4,12,3,13,2,14,1,15]; }
+
+// read $n bits LSB-first -> [value, newpos]
+function inf__getbits($bytes, $pos, $n) {
+    $v = 0;
+    $i = 0;
+    while ($i < $n) {
+        $v = $v | ((($bytes[$pos >> 3] >> ($pos & 7)) & 1) << $i);
+        $pos = $pos + 1;
+        $i = $i + 1;
+    }
+    return [$v, $pos];
+}
+// build canonical Huffman from code lengths -> ["count"=>.., "symbol"=>..]
+function inf__build($length, $n) {
+    $count = inf__zeros(16);
+    $i = 0;
+    while ($i < $n) { $count[$length[$i]] = $count[$length[$i]] + 1; $i = $i + 1; }
+    $count[0] = 0;
+    $offs = inf__zeros(16);
+    $len = 1;
+    while ($len < 15) { $offs[$len + 1] = $offs[$len] + $count[$len]; $len = $len + 1; }
+    $symbol = inf__zeros($n);
+    $s = 0;
+    while ($s < $n) {
+        if ($length[$s] != 0) {
+            $symbol[$offs[$length[$s]]] = $s;
+            $offs[$length[$s]] = $offs[$length[$s]] + 1;
+        }
+        $s = $s + 1;
+    }
+    return ["count" => $count, "symbol" => $symbol];
+}
+// decode one symbol -> [symbol, newpos]
+function inf__decode($bytes, $pos, $h) {
+    $count = $h["count"];
+    $symbol = $h["symbol"];
+    $code = 0;
+    $first = 0;
+    $index = 0;
+    $len = 1;
+    while ($len <= 15) {
+        $code = $code | (($bytes[$pos >> 3] >> ($pos & 7)) & 1);
+        $pos = $pos + 1;
+        $cnt = $count[$len];
+        if ($code - $first < $cnt) { return [$symbol[$index + $code - $first], $pos]; }
+        $index = $index + $cnt;
+        $first = ($first + $cnt) << 1;
+        $code = $code << 1;
+        $len = $len + 1;
+    }
+    return [0 - 1, $pos];
+}
+// fixed Huffman tables
+function inf__fixed_litlen() {
+    $l = inf__zeros(288);
+    $i = 0;
+    while ($i < 288) {
+        if ($i < 144) { $l[$i] = 8; } else { if ($i < 256) { $l[$i] = 9; } else { if ($i < 280) { $l[$i] = 7; } else { $l[$i] = 8; } } }
+        $i = $i + 1;
+    }
+    return inf__build($l, 288);
+}
+function inf__fixed_dist() {
+    $l = inf__zeros(30);
+    $i = 0;
+    while ($i < 30) { $l[$i] = 5; $i = $i + 1; }
+    return inf__build($l, 30);
+}
+
+// decode one block body given lit/len + dist Huffman tables. returns [out, outpos, pos]
+function inf__block($bytes, $pos, $out, $outpos, $lh, $dh) {
+    $lenbase = inf__lenbase();
+    $lenext = inf__lenext();
+    $distbase = inf__distbase();
+    $distext = inf__distext();
+    $done = 0;
+    while ($done == 0) {
+        $r = inf__decode($bytes, $pos, $lh);
+        $sym = $r[0];
+        $pos = $r[1];
+        if ($sym == 256) { $done = 1; }
+        else {
+            if ($sym < 256) {
+                $out[$outpos] = $sym;
+                $outpos = $outpos + 1;
+            } else {
+                $si = $sym - 257;
+                $rb = inf__getbits($bytes, $pos, $lenext[$si]);
+                $length = $lenbase[$si] + $rb[0];
+                $pos = $rb[1];
+                $rd = inf__decode($bytes, $pos, $dh);
+                $dsym = $rd[0];
+                $pos = $rd[1];
+                $re = inf__getbits($bytes, $pos, $distext[$dsym]);
+                $dist = $distbase[$dsym] + $re[0];
+                $pos = $re[1];
+                $k = 0;
+                while ($k < $length) {
+                    $out[$outpos] = $out[$outpos - $dist];
+                    $outpos = $outpos + 1;
+                    $k = $k + 1;
+                }
+            }
+        }
+    }
+    return [$out, $outpos, $pos];
+}
+
+function inflate($bytes, $outsize) {
+    $out = inf__zeros($outsize);
+    $outpos = 0;
+    $pos = 0;
+    $clord = inf__clorder();
+    $final = 0;
+    while ($final == 0) {
+        $rf = inf__getbits($bytes, $pos, 1); $final = $rf[0]; $pos = $rf[1];
+        $rt = inf__getbits($bytes, $pos, 2); $btype = $rt[0]; $pos = $rt[1];
+        if ($btype == 0) {
+            // stored: skip to byte boundary
+            $pos = ($pos + 7) - (($pos + 7) % 8);
+            $rl = inf__getbits($bytes, $pos, 16); $len = $rl[0]; $pos = $rl[1];
+            $rn = inf__getbits($bytes, $pos, 16); $pos = $rn[1];
+            $k = 0;
+            while ($k < $len) {
+                $out[$outpos] = ($bytes[$pos >> 3]);
+                $pos = $pos + 8;
+                $outpos = $outpos + 1;
+                $k = $k + 1;
+            }
+        } else {
+            $lh = null;
+            $dh = null;
+            if ($btype == 1) {
+                $lh = inf__fixed_litlen();
+                $dh = inf__fixed_dist();
+            } else {
+                $rh = inf__getbits($bytes, $pos, 5); $hlit = $rh[0] + 257; $pos = $rh[1];
+                $rd = inf__getbits($bytes, $pos, 5); $hdist = $rd[0] + 1; $pos = $rd[1];
+                $rc = inf__getbits($bytes, $pos, 4); $hclen = $rc[0] + 4; $pos = $rc[1];
+                $cll = inf__zeros(19);
+                $i = 0;
+                while ($i < $hclen) {
+                    $rr = inf__getbits($bytes, $pos, 3);
+                    $cll[$clord[$i]] = $rr[0];
+                    $pos = $rr[1];
+                    $i = $i + 1;
+                }
+                $clh = inf__build($cll, 19);
+                // read code lengths for lit/len + dist
+                $all = inf__zeros($hlit + $hdist);
+                $n = 0;
+                while ($n < $hlit + $hdist) {
+                    $rs = inf__decode($bytes, $pos, $clh);
+                    $sym = $rs[0];
+                    $pos = $rs[1];
+                    if ($sym < 16) { $all[$n] = $sym; $n = $n + 1; }
+                    else {
+                        $rep = 0;
+                        $val = 0;
+                        if ($sym == 16) { $rr = inf__getbits($bytes, $pos, 2); $rep = $rr[0] + 3; $pos = $rr[1]; $val = $all[$n - 1]; }
+                        else { if ($sym == 17) { $rr = inf__getbits($bytes, $pos, 3); $rep = $rr[0] + 3; $pos = $rr[1]; }
+                        else { $rr = inf__getbits($bytes, $pos, 7); $rep = $rr[0] + 11; $pos = $rr[1]; } }
+                        $j = 0;
+                        while ($j < $rep) { $all[$n] = $val; $n = $n + 1; $j = $j + 1; }
+                    }
+                }
+                $litl = array::slice($all, 0, $hlit);
+                $distl = array::slice($all, $hlit, $hdist);
+                $lh = inf__build($litl, $hlit);
+                $dh = inf__build($distl, $hdist);
+            }
+            $rb = inf__block($bytes, $pos, $out, $outpos, $lh, $dh);
+            $out = $rb[0];
+            $outpos = $rb[1];
+            $pos = $rb[2];
+        }
+    }
+    return $out;
+}
+
+// ── reading: binary -> byte array, ZIP parse (inflate), XML -> rows ──────────────
+
+// char-based index_of (x__idx returns BYTE offset but substr/len are CHAR-based)
+function x__idx($hay, $needle) {
+    $hl = string::len($hay);
+    $nl = string::len($needle);
+    $i = 0;
+    while ($i + $nl <= $hl) {
+        if (string::substr($hay, $i, $nl) == $needle) { return $i; }
+        $i = $i + 1;
+    }
+    return 0 - 1;
+}
+// whole binary string -> pre-allocated byte array (O(n))
+function xlsx__to_bytes($bin) {
+    $hex = crypto::hex_encode($bin);
+    $n = string::len($hex) / 2;
+    $out = inf__zeros($n);
+    $i = 0;
+    while ($i < $n) {
+        $out[$i] = xlsx__hx2(string::substr($hex, $i * 2, 2));
+        $i = $i + 1;
+    }
+    return $out;
+}
+function xlsx__rd16($d, $i) { return $d[$i] | ($d[$i + 1] << 8); }
+function xlsx__rd32($d, $i) { return $d[$i] | ($d[$i + 1] << 8) | ($d[$i + 2] << 16) | ($d[$i + 3] << 24); }
+// slice of a byte array -> UTF-8 string
+function xlsx__bstr($d, $from, $len) {
+    $hex = "";
+    $i = 0;
+    while ($i < $len) { $hex = $hex . xlsx__byte($d[$from + $i]); $i = $i + 1; }
+    return crypto::hex_decode($hex);
+}
+// find End Of Central Directory (signature 50 4b 05 06), scanning from the end
+function xlsx__find_eocd($d) {
+    $i = count($d) - 22;
+    while ($i >= 0) {
+        if ($d[$i] == 80 && $d[$i + 1] == 75 && $d[$i + 2] == 5 && $d[$i + 3] == 6) { return $i; }
+        $i = $i - 1;
+    }
+    return 0 - 1;
+}
+// unzip -> assoc: entry name -> content string (inflating deflated entries)
+function xlsx__unzip($d) {
+    $out = ["__names__" => []];
+    $eocd = xlsx__find_eocd($d);
+    $count = xlsx__rd16($d, $eocd + 10);
+    $p = xlsx__rd32($d, $eocd + 16);
+    $k = 0;
+    while ($k < $count) {
+        // central directory entry
+        $method = xlsx__rd16($d, $p + 10);
+        $csize = xlsx__rd32($d, $p + 20);
+        $usize = xlsx__rd32($d, $p + 24);
+        $nlen = xlsx__rd16($d, $p + 28);
+        $elen = xlsx__rd16($d, $p + 30);
+        $clen = xlsx__rd16($d, $p + 32);
+        $loff = xlsx__rd32($d, $p + 42);
+        $name = xlsx__bstr($d, $p + 46, $nlen);
+        // local header: data starts after local name+extra
+        $lnlen = xlsx__rd16($d, $loff + 26);
+        $lelen = xlsx__rd16($d, $loff + 28);
+        $dstart = $loff + 30 + $lnlen + $lelen;
+        $content = "";
+        if ($method == 0) {
+            $content = xlsx__bstr($d, $dstart, $csize);
+        } else {
+            // deflate: pull comp bytes, inflate to usize, bytes->string
+            $comp = inf__zeros($csize);
+            $j = 0;
+            while ($j < $csize) { $comp[$j] = $d[$dstart + $j]; $j = $j + 1; }
+            $raw = inflate($comp, $usize);
+            $hex = "";
+            $j = 0;
+            while ($j < $usize) { $hex = $hex . xlsx__byte($raw[$j]); $j = $j + 1; }
+            $content = crypto::hex_decode($hex);
+        }
+        $out[$name] = $content;
+        $out["__names__"] = array::push($out["__names__"], $name);
+        $p = $p + 46 + $nlen + $elen + $clen;
+        $k = $k + 1;
+    }
+    return $out;
+}
+
+// ── tiny XML helpers ─────────────────────────────────────────────────────────────
+function xlsx__unesc($s) {
+    $s = string::replace($s, "&lt;", "<");
+    $s = string::replace($s, "&gt;", ">");
+    $s = string::replace($s, "&quot;", "\"");
+    $s = string::replace($s, "&#39;", "'");
+    $s = string::replace($s, "&apos;", "'");
+    $s = string::replace($s, "&amp;", "&");
+    return $s;
+}
+// value of attribute $name in tag text $t  ('r="A1"' -> A1)
+function xlsx__attr($t, $name) {
+    $key = $name . "=\"";
+    $i = x__idx($t, $key);
+    if ($i < 0) { return ""; }
+    $start = $i + string::len($key);
+    $rest = string::substr($t, $start, string::len($t) - $start);
+    $end = x__idx($rest, "\"");
+    if ($end < 0) { return ""; }
+    return string::substr($rest, 0, $end);
+}
+// text between first "<t...>" and "</t>" of $s
+function xlsx__tnode($s) {
+    $i = x__idx($s, "<t");
+    if ($i < 0) { return ""; }
+    $rest = string::substr($s, $i, string::len($s) - $i);
+    $gt = x__idx($rest, ">");
+    $after = string::substr($rest, $gt + 1, string::len($rest) - $gt - 1);
+    $close = x__idx($after, "</t>");
+    return xlsx__unesc(string::substr($after, 0, $close));
+}
+// column number from a cell ref ("C5" -> 3)
+function xlsx__col($ref) {
+    $n = 0;
+    $i = 0;
+    while ($i < string::len($ref)) {
+        $c = string::substr($ref, $i, 1);
+        if ($c >= "A" && $c <= "Z") {
+            $n = $n * 26 + (x__idx("ABCDEFGHIJKLMNOPQRSTUVWXYZ", $c) + 1);
+            $i = $i + 1;
+        } else { $i = string::len($ref); }
+    }
+    return $n;
+}
+// parse sharedStrings.xml -> array of strings
+function xlsx__shared($xml) {
+    $out = [];
+    if ($xml == null || $xml == "") { return $out; }
+    $parts = string::split($xml, "<si>");
+    $i = 1;
+    while ($i < count($parts)) {
+        $seg = $parts[$i];
+        $end = x__idx($seg, "</si>");
+        $out = array::push($out, xlsx__tnode(string::substr($seg, 0, $end)));
+        $i = $i + 1;
+    }
+    return $out;
+}
+// parse one sheet xml -> rows (array of arrays), using shared strings
+// is numFmtId a date/time format? built-in 14-22 & 45-47, or a custom code with y/d tokens.
+function xlsx__is_datefmt($id, $codes) {
+    if (($id >= 14 && $id <= 22) || ($id >= 45 && $id <= 47)) { return 1; }
+    $code = $codes["" . $id];
+    if ($code != null) {
+        if (x__idx($code, "y") >= 0 || x__idx($code, "d") >= 0) { return 1; }
+    }
+    return 0;
+}
+// parse styles.xml -> array: cell-style-index -> 1 if that style is a date format
+function xlsx__style_dates($xml) {
+    $out = [];
+    if ($xml == null || $xml == "") { return $out; }
+    $codes = array::new_assoc();
+    $nf = string::split($xml, "<numFmt ");
+    $i = 1;
+    while ($i < count($nf)) {
+        $seg = $nf[$i];
+        $gt = x__idx($seg, ">");
+        $tag = string::substr($seg, 0, $gt);
+        $codes["" . type::to_int(xlsx__attr($tag, "numFmtId"))] = xlsx__attr($tag, "formatCode");
+        $i = $i + 1;
+    }
+    $cx = x__idx($xml, "<cellXfs");
+    if ($cx < 0) { return $out; }
+    $rest = string::substr($xml, $cx, string::len($xml) - $cx);
+    $cxend = x__idx($rest, "</cellXfs>");
+    if ($cxend < 0) { $cxend = string::len($rest); }
+    $cxxml = string::substr($rest, 0, $cxend);
+    $xf = string::split($cxxml, "<xf ");
+    $i = 1;
+    while ($i < count($xf)) {
+        $seg = $xf[$i];
+        $gt = x__idx($seg, ">");
+        $tag = string::substr($seg, 0, $gt);
+        $out = array::push($out, xlsx__is_datefmt(type::to_int(xlsx__attr($tag, "numFmtId")), $codes));
+        $i = $i + 1;
+    }
+    return $out;
+}
+function xlsx__dateflag($ds, $idx) {
+    if ($idx >= 0 && $idx < count($ds)) { return $ds[$idx]; }
+    return 0;
+}
+// Excel serial number -> "Y-m-d" (or with time if fractional). Base 1899-12-30.
+function xlsx__serial_date($vi) {
+    $serial = type::to_float($vi);
+    $secs = math::floor(($serial - 25569) * 86400 + 0.5);
+    $dt = date::from_timestamp($secs);
+    if ($serial == math::floor($serial)) { return date::format($dt, "Y-m-d"); }
+    return date::format($dt, "Y-m-d H:i:s");
+}
+
+function xlsx__parse_sheet($xml, $shared, $datestyles) {
+    $rows = [];
+    $rparts = string::split($xml, "<row");
+    $ri = 1;
+    while ($ri < count($rparts)) {
+        $rseg = $rparts[$ri];
+        $rend = x__idx($rseg, "</row>");
+        if ($rend < 0) { $rend = string::len($rseg); }
+        $rowxml = string::substr($rseg, 0, $rend);
+        $cparts = string::split($rowxml, "<c ");
+        $row = [];
+        $maxcol = 0;
+        $vals = [];
+        $ci = 1;
+        while ($ci < count($cparts)) {
+            $cseg = $cparts[$ci];
+            $gt = x__idx($cseg, ">");
+            $ctag = string::substr($cseg, 0, $gt);
+            $ref = xlsx__attr($ctag, "r");
+            $t = xlsx__attr($ctag, "t");
+            $col = xlsx__col($ref);
+            $body = string::substr($cseg, $gt + 1, string::len($cseg) - $gt - 1);
+            $val = "";
+            if ($t == "s") {
+                $vi = xlsx__tnode_v($body);
+                $val = $shared[type::to_int($vi)];
+            } else {
+                if ($t == "inlineStr" || $t == "str") { $val = xlsx__tnode($body); }
+                else {
+                    $vi = xlsx__tnode_v($body);
+                    $sidx = xlsx__attr($ctag, "s");
+                    if ($sidx != "" && xlsx__dateflag($datestyles, type::to_int($sidx)) == 1) {
+                        $val = xlsx__serial_date($vi);
+                    } else {
+                        $val = xlsx__num($vi);
+                    }
+                }
+            }
+            $vals = array::push($vals, [$col, $val]);
+            if ($col > $maxcol) { $maxcol = $col; }
+            $ci = $ci + 1;
+        }
+        // place into columns
+        $r = inf__zeros($maxcol);
+        $z = 0;
+        while ($z < $maxcol) { $r[$z] = ""; $z = $z + 1; }
+        $z = 0;
+        while ($z < count($vals)) { $r[$vals[$z][0] - 1] = $vals[$z][1]; $z = $z + 1; }
+        $rows = array::push($rows, $r);
+        $ri = $ri + 1;
+    }
+    return $rows;
+}
+// text between <v> and </v>
+function xlsx__tnode_v($s) {
+    $i = x__idx($s, "<v>");
+    if ($i < 0) { return ""; }
+    $after = string::substr($s, $i + 3, string::len($s) - $i - 3);
+    $close = x__idx($after, "</v>");
+    return string::substr($after, 0, $close);
+}
+// numeric string -> int or float
+function xlsx__num($s) {
+    if (x__idx($s, ".") >= 0) { return type::to_float($s); }
+    return type::to_int($s);
+}
+
+// xlsx_read($binary) -> array of ["name"=>.., "rows"=>..] (all sheets, in order)
+function xlsx_read($bin) {
+    $d = xlsx__to_bytes($bin);
+    $z = xlsx__unzip($d);
+    $shared = xlsx__shared($z["xl/sharedStrings.xml"]);
+    $datestyles = xlsx__style_dates($z["xl/styles.xml"]);
+    $wb = $z["xl/workbook.xml"];
+    $names = [];
+    $sparts = string::split($wb, "<sheet ");
+    $i = 1;
+    while ($i < count($sparts)) {
+        $seg = $sparts[$i];
+        $gt = x__idx($seg, ">");
+        $names = array::push($names, xlsx__unesc(xlsx__attr(string::substr($seg, 0, $gt), "name")));
+        $i = $i + 1;
+    }
+    $out = [];
+    $si = 0;
+    while ($si < count($names)) {
+        $sheetxml = $z["xl/worksheets/sheet" . ($si + 1) . ".xml"];
+        $rows = xlsx__parse_sheet($sheetxml, $shared, $datestyles);
+        $out = array::push($out, ["name" => $names[$si], "rows" => $rows]);
+        $si = $si + 1;
+    }
+    return $out;
+}

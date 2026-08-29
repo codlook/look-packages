@@ -1,0 +1,99 @@
+use string;
+use array;
+use type;
+
+// validate-tr — Turkish form validators for LOOK, pure LOOK (no service, no dependency).
+// TC Kimlik No, IBAN, GSM number and licence plate — the checks every Turkish sign-up /
+// order form needs. All deterministic (checksum / mod-97 / format), verifiable locally.
+//
+//   tckn_valid($tc)       -> 1/0   TC Kimlik No (11 digits, official checksum)
+//   iban_valid($iban)     -> 1/0   IBAN (ISO mod-97; spaces ok, any country)
+//   gsm_valid($num)       -> 1/0   Turkish mobile number
+//   gsm_normalize($num)   -> "5XXXXXXXXX" or ""   (strips +90 / 0, keeps 10 digits)
+//   plate_valid($p)       -> 1/0   Turkish licence plate (province 01–81 + letters + digits)
+
+function vtr__digit($ch) {
+    if ($ch >= "0" && $ch <= "9") { return type::to_int($ch); }
+    return 0 - 1;
+}
+
+// ── TC Kimlik No ─────────────────────────────────────────────────────────────
+// 11 digits; d1≠0; d10 = ((odd·7 − even) mod 10); d11 = (sum of first 10) mod 10.
+function tckn_valid($tc) {
+    if (string::len($tc) != 11) { return 0; }
+    $d = [];
+    $i = 0;
+    while ($i < 11) {
+        $v = vtr__digit(string::substr($tc, $i, 1));
+        if ($v < 0) { return 0; }
+        $d = array::push($d, $v);
+        $i = $i + 1;
+    }
+    if ($d[0] == 0) { return 0; }
+    $odd = $d[0] + $d[2] + $d[4] + $d[6] + $d[8];
+    $even = $d[1] + $d[3] + $d[5] + $d[7];
+    $c10 = ((($odd * 7 - $even) % 10) + 10) % 10;
+    if ($c10 != $d[9]) { return 0; }
+    $c11 = (($odd + $even + $d[9]) % 10);
+    if ($c11 != $d[10]) { return 0; }
+    return 1;
+}
+
+// ── IBAN (ISO 13616 mod-97) ──────────────────────────────────────────────────
+function iban_valid($iban) {
+    $s = string::upper(string::replace("" . $iban, " ", ""));
+    $n = string::len($s);
+    if ($n < 15 || $n > 34) { return 0; }
+    // move the first 4 chars to the end, then reduce mod 97 digit-by-digit
+    $rearr = string::substr($s, 4, $n - 4) . string::substr($s, 0, 4);
+    $rem = 0;
+    $i = 0;
+    while ($i < $n) {
+        $ch = string::substr($rearr, $i, 1);
+        if ($ch >= "0" && $ch <= "9") {
+            $rem = ($rem * 10 + type::to_int($ch)) % 97;
+        } else {
+            if ($ch >= "A" && $ch <= "Z") {
+                $rem = ($rem * 100 + (string::index_of("ABCDEFGHIJKLMNOPQRSTUVWXYZ", $ch) + 10)) % 97;
+            } else {
+                return 0;
+            }
+        }
+        $i = $i + 1;
+    }
+    if ($rem == 1) { return 1; }
+    return 0;
+}
+
+// ── GSM (Turkish mobile) ─────────────────────────────────────────────────────
+// normalize to a 10-digit "5XXXXXXXXX" (strip +90 / leading 0 / spaces / punctuation)
+function gsm_normalize($num) {
+    $s = "" . $num;
+    $digits = "";
+    $i = 0;
+    while ($i < string::len($s)) {
+        $ch = string::substr($s, $i, 1);
+        if ($ch >= "0" && $ch <= "9") { $digits = $digits . $ch; }
+        $i = $i + 1;
+    }
+    $n = string::len($digits);
+    // 90XXXXXXXXXX (12) -> drop 90 ; 0XXXXXXXXXX (11) -> drop 0
+    if ($n == 12 && string::substr($digits, 0, 2) == "90") { $digits = string::substr($digits, 2, 10); }
+    else { if ($n == 11 && string::substr($digits, 0, 1) == "0") { $digits = string::substr($digits, 1, 10); } }
+    if (string::len($digits) != 10) { return ""; }
+    if (string::substr($digits, 0, 1) != "5") { return ""; }
+    return $digits;
+}
+function gsm_valid($num) {
+    if (gsm_normalize($num) == "") { return 0; }
+    return 1;
+}
+
+// ── Licence plate ────────────────────────────────────────────────────────────
+// NN L(1-3) N(2-4), province 01–81. Spaces optional.
+function plate_valid($p) {
+    $s = string::upper(string::replace("" . $p, " ", ""));
+    $pat = "^(0[1-9]|[1-7][0-9]|8[01])[A-Z]{1,3}[0-9]{2,4}$";
+    if (string::regex_match($s, $pat)) { return 1; }
+    return 0;
+}

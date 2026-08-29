@@ -1,0 +1,26 @@
+// example.lk — using the barcode package.  Run it:  lk example.lk
+
+use "pkg/barcode/barcode.lk"
+
+// 1. The easy way — text or code in, SVG out.
+file::put("sku.svg", barcode("LOOK-8691234"));
+
+// 2. With control — exact pixel size (width/height) and color. The SVG scales to fit.
+file::put("sku-sized.svg", barcode_svg("8691234567890", [
+    "width"  => 400,
+    "height" => 90,
+    "dark"   => "#1a1a2e"
+]));
+
+print("wrote sku.svg and sku-sized.svg — open or scan them");
+
+// 3. Grab the SVG as a plain string — assign it, print it, return it from a route.
+$ornekBarkod = barcode("ORDER-42");
+print($ornekBarkod);
+
+// 4. Serve it live from a route (uncomment inside an lk-fcgi app):
+//
+//   route("GET", "/barcode/{sku}", function() {
+//       response::header("Content-Type", "image/svg+xml")
+//       response::text(barcode(request::param("sku")))
+//   })

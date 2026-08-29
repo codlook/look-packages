@@ -1,0 +1,9 @@
+{
+  "description": "Code 128 barcode generator — pure LOOK, no native code and no external service. Encodes printable-ASCII (SKUs, order ids, short URLs) with automatic code-set switching that packs digit runs two-to-a-symbol, rendered to a self-contained SVG. Verified module-for-module against python-barcode.",
+  "tags": ["barcode", "code128", "svg", "sku"],
+  "icon": "🏷️",
+  "color": "navy",
+  "use": "use \"pkg/barcode\"",
+  "version": "1.0.0",
+  "author": "codlook"
+}

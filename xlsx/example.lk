@@ -1,0 +1,38 @@
+// example.lk — using the xlsx package.  Run it:  lk example.lk
+
+use "pkg/xlsx/xlsx.lk"
+use array;
+
+// 1. WRITE — rows in, a real .xlsx out. Numbers become real number cells (UTF-8, so
+//    Turkish is fine).
+$rows = [
+    ["Ürün", "Adet", "Fiyat"],
+    ["Adana Döner", 2, 120.50],
+    ["Künefe", 1, 85.50],
+    ["Ayran", 4, 20.00]
+];
+file::put("urunler.xlsx", xlsx($rows));
+print("wrote urunler.xlsx");
+
+// 2. Many sheets — a workbook.
+file::put("defter.xlsx", xlsx_book([
+    ["name" => "Satışlar",   "rows" => [["Tarih", "Tutar"], ["2026-08-01", 1250]]],
+    ["name" => "Müşteriler", "rows" => [["Ad", "Şehir"], ["Ahmet", "İstanbul"]]]
+]));
+print("wrote defter.xlsx");
+
+// 3. READ — any .xlsx, including files made by Excel / Google Sheets (compressed).
+$book = xlsx_read(file::read("urunler.xlsx"));
+print("read: " . $book[0]["name"] . ", " . count($book[0]["rows"]) . " rows");
+
+// 4. UPDATE — read, change the rows, write again. Here: a 10% price rise + a new row.
+$rows = $book[0]["rows"];
+$i = 1;
+while ($i < count($rows)) { $rows[$i][2] = $rows[$i][2] * 1.1; $i = $i + 1; }
+$rows = array::push($rows, ["Çay", 3, 15.00]);
+file::put("guncel.xlsx", xlsx_book([["name" => "Ürünler", "rows" => $rows]]));
+print("wrote guncel.xlsx (updated)");
+
+// Straight from the database:
+//   $rows = db::query($conn, "SELECT ad, adet, fiyat FROM urunler", [])
+//   file::put("rapor.xlsx", xlsx($rows))

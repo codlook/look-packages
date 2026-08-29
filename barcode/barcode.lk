@@ -1,0 +1,170 @@
+use array;
+use crypto;
+use string;
+
+// barcode — Code 128 barcode generator for LOOK, pure LOOK (no native code, no service).
+// Encodes any printable-ASCII text (SKUs, order ids, short URLs) as a compact Code 128
+// symbol: it starts in code set C, packs runs of digits two-to-a-symbol, and switches to
+// code set B for letters/punctuation — the same size-optimising strategy real barcode
+// libraries use. Rendered to a self-contained SVG. Ported from python-barcode and verified
+// module-for-module against it.
+//
+//   barcode($text)             -> string   SVG with sensible defaults (the easy one-liner)
+//   barcode_svg($text, $opts)  -> string   SVG with sizing / color control
+//   barcode_pattern($text)     -> string   the raw module string ("1"=bar, "0"=space)
+//
+// $opts (assoc, all optional): "height" (px, default 80), "width" (displayed px — the SVG
+// scales to fit; default: natural), "scale" (bar unit px, default 2), "quiet" (quiet-zone
+// modules each side, default 10), "dark"/"light" colors.
+//
+// Code 128 covers printable ASCII (bytes 32–126). Non-ASCII (e.g. Turkish letters) has no
+// Code 128 representation — use the qr package for that.
+
+// The 106 Code 128 module patterns, indexed by symbol value (0–105).
+function code128__codes() {
+    return ["11011001100","11001101100","11001100110","10010011000","10010001100","10001001100","10011001000","10011000100","10001100100","11001001000","11001000100","11000100100","10110011100","10011011100","10011001110","10111001100","10011101100","10011100110","11001110010","11001011100","11001001110","11011100100","11001110100","11101101110","11101001100","11100101100","11100100110","11101100100","11100110100","11100110010","11011011000","11011000110","11000110110","10100011000","10001011000","10001000110","10110001000","10001101000","10001100010","11010001000","11000101000","11000100010","10110111000","10110001110","10001101110","10111011000","10111000110","10001110110","11101110110","11010001110","11000101110","11011101000","11011100010","11011101110","11101011000","11101000110","11100010110","11101101000","11101100010","11100011010","11101111010","11001000010","11110001010","10100110000","10100001100","10010110000","10010000110","10000101100","10000100110","10110010000","10110000100","10011010000","10011000010","10000110100","10000110010","11000010010","11001010000","11110111010","11000010100","10001111010","10100111100","10010111100","10010011110","10111100100","10011110100","10011110010","11110100100","11110010100","11110010010","11011011110","11011110110","11110110110","10101111000","10100011110","10001011110","10111101000","10111100010","11110101000","11110100010","10111011110","10111101110","11101011110","11110101110","11010000100","11010010000","11010011100"];
+}
+
+function barcode__bytes($text) {
+    $hex = crypto::hex_encode($text);
+    $out = [];
+    $i = 0;
+    $n = string::len($hex);
+    while ($i < $n) {
+        $out = array::push($out, barcode__hex2(string::substr($hex, $i, 2)));
+        $i = $i + 2;
+    }
+    return $out;
+}
+function barcode__hexval($ch) {
+    if ($ch == "0") { return 0; } if ($ch == "1") { return 1; } if ($ch == "2") { return 2; }
+    if ($ch == "3") { return 3; } if ($ch == "4") { return 4; } if ($ch == "5") { return 5; }
+    if ($ch == "6") { return 6; } if ($ch == "7") { return 7; } if ($ch == "8") { return 8; }
+    if ($ch == "9") { return 9; } if ($ch == "a") { return 10; } if ($ch == "b") { return 11; }
+    if ($ch == "c") { return 12; } if ($ch == "d") { return 13; } if ($ch == "e") { return 14; }
+    return 15;
+}
+function barcode__hex2($pair) {
+    return barcode__hexval(string::substr($pair, 0, 1)) * 16 + barcode__hexval(string::substr($pair, 1, 1));
+}
+
+// how many leading digits from position $p (used to decide a switch to code set C)
+function barcode__lookdigits($bytes, $p) {
+    $n = count($bytes);
+    $end = $p + 10;
+    if ($end > $n) { $end = $n; }
+    $c = 0;
+    $i = $p;
+    while ($i < $end) {
+        if ($bytes[$i] >= 48 && $bytes[$i] <= 57) { $c = $c + 1; } else { $i = $end; }
+        $i = $i + 1;
+    }
+    return $c;
+}
+
+// encode text to a list of Code 128 symbol values (start .. data .. — no checksum yet)
+function code128__values($bytes) {
+    $n = count($bytes);
+    $enc = [105];            // START C
+    $charset = "C";
+    $buffer = 0 - 1;         // one held digit byte, or -1 for none
+    $i = 0;
+    while ($i < $n) {
+        $b = $bytes[$i];
+        $isdigit = ($b >= 48 && $b <= 57);
+        if ($charset == "C") {
+            if (!$isdigit) {
+                $enc = array::push($enc, 100);       // switch to B
+                $charset = "B";
+                if ($buffer >= 0) { $enc = array::push($enc, $buffer - 32); $buffer = 0 - 1; }
+            }
+        } else {
+            if (barcode__lookdigits($bytes, $i) > 3) {
+                $enc = array::push($enc, 99);         // switch to C
+                $charset = "C";
+            }
+        }
+        if ($charset == "B") {
+            $enc = array::push($enc, $b - 32);
+        } else {
+            if ($buffer < 0) { $buffer = $b; }
+            else {
+                $enc = array::push($enc, ($buffer - 48) * 10 + ($b - 48));
+                $buffer = 0 - 1;
+            }
+        }
+        $i = $i + 1;
+    }
+    if ($buffer >= 0) {                              // a trailing lone digit -> code set B
+        $enc = array::push($enc, 100);
+        $enc = array::push($enc, $buffer - 32);
+        $buffer = 0 - 1;
+    }
+    // collapse START_C + immediate switch into the matching start symbol
+    if ($enc[1] == 99 || $enc[1] == 100 || $enc[1] == 101) {
+        $to = 105;
+        if ($enc[1] == 100) { $to = 104; }
+        if ($enc[1] == 101) { $to = 103; }
+        $new = [$to];
+        $k = 2;
+        while ($k < count($enc)) { $new = array::push($new, $enc[$k]); $k = $k + 1; }
+        $enc = $new;
+    }
+    return $enc;
+}
+
+// barcode_pattern($text) -> module string ("1"=bar, "0"=space), including start/checksum/stop
+function barcode_pattern($text) {
+    $enc = code128__values(barcode__bytes($text));
+    // checksum: (start + sum(i * value_i)) % 103
+    $sum = $enc[0];
+    $i = 1;
+    while ($i < count($enc)) { $sum = $sum + $i * $enc[$i]; $i = $i + 1; }
+    $enc = array::push($enc, $sum % 103);
+    // assemble patterns
+    $codes = code128__codes();
+    $out = "";
+    $i = 0;
+    while ($i < count($enc)) { $out = $out . $codes[$enc[$i]]; $i = $i + 1; }
+    return $out . "11000111010" . "11";              // STOP + final bars
+}
+
+// barcode_svg($text, $opts) -> SVG string
+function barcode_svg($text, $opts) {
+    $scale = 2;
+    $height = 80;
+    $quiet = 10;
+    $dark = "#000";
+    $light = "#fff";
+    $width = 0 - 1;
+    if ($opts != null) {
+        if ($opts["scale"] != null)  { $scale = $opts["scale"]; }
+        if ($opts["height"] != null) { $height = $opts["height"]; }
+        if ($opts["quiet"] != null)  { $quiet = $opts["quiet"]; }
+        if ($opts["dark"] != null)   { $dark = $opts["dark"]; }
+        if ($opts["light"] != null)  { $light = $opts["light"]; }
+        if ($opts["width"] != null)  { $width = $opts["width"]; }
+    }
+    $pat = barcode_pattern($text);
+    $n = string::len($pat);
+    $vbw = ($n + $quiet * 2) * $scale;       // natural width in module coordinates
+    $w = $vbw;
+    if ($width > 0) { $w = $width; }          // width (if given) sets the displayed px; vector scales
+    $svg = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"" . $w . "\" height=\"" . $height . "\" viewBox=\"0 0 " . $vbw . " " . $height . "\" shape-rendering=\"crispEdges\">";
+    $svg = $svg . "<rect width=\"" . $w . "\" height=\"" . $height . "\" fill=\"" . $light . "\"/>";
+    $svg = $svg . "<path fill=\"" . $dark . "\" d=\"";
+    $i = 0;
+    while ($i < $n) {
+        if (string::substr($pat, $i, 1) == "1") {
+            $x = ($quiet + $i) * $scale;
+            $svg = $svg . "M" . $x . " 0h" . $scale . "v" . $height . "h-" . $scale . "z";
+        }
+        $i = $i + 1;
+    }
+    return $svg . "\"/></svg>";
+}
+
+// barcode($text) -> SVG with sensible defaults (the easy one-liner)
+function barcode($text) {
+    return barcode_svg($text, null);
+}

@@ -1,0 +1,25 @@
+// example.lk — using the image package.  Run it:  lk example.lk
+
+use "pkg/image/image.lk"
+
+// 1. Load a PNG, see its size.
+$img = image_load(file::read("logo.png"));
+$sz = image_size($img);
+print("loaded " . $sz[0] . "x" . $sz[1]);
+
+// 2. Resize (make a thumbnail).
+file::put("logo-thumb.png", image_png(image_resize($img, 96, 64)));
+print("wrote logo-thumb.png (96x64)");
+
+// 3. Crop a region (x, y, width, height).
+file::put("logo-crop.png", image_png(image_crop($img, 20, 20, 120, 100)));
+print("wrote logo-crop.png");
+
+// 4. Change the extension — export to BMP.
+file::put("logo.bmp", image_bmp($img));
+print("wrote logo.bmp");
+
+// Pairs with the qr package — render a QR to PNG (from its 0/1 matrix):
+//   use "pkg/qr/qr.lk"
+//   $m = qr_matrix("https://qrmenu.codlook.com/menu/42", "M")
+//   ... build an img from the matrix (module -> pixels) and image_png(...) it ...

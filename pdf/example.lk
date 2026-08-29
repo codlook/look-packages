@@ -1,0 +1,31 @@
+// example.lk — using the pdf package.  Run it:  lk example.lk
+
+use "pkg/pdf/pdf.lk"
+
+// ── The document builder — flowing layout: auto word-wrap, page breaks, alignment,
+//    colors and tables. This is the easy, high-level way.
+$d = doc_new(null);                                     // A4 page, 50pt margins
+$d = doc_heading($d, "FATURA — Codlook Restoran");
+$d = doc_text($d, "Müşteri: Ahmet Yılmaz — No: 2026-0042 — Kadıköy / İstanbul", ["size" => 10, "color" => "#666666"]);
+$d = doc_hr($d);
+
+$d = doc_table($d, [
+    ["Ürün", "Adet", "Birim", "Tutar"],
+    ["Adana Döner", "2", "120,00", "240,00"],
+    ["Künefe", "1", "85,50", "85,50"],
+    ["Ayran", "4", "20,00", "80,00"]
+], ["header" => 1, "cols" => [250, 60, 90, 95], "aligns" => ["left", "center", "right", "right"]]);
+
+$d = doc_spacer($d, 8);
+$d = doc_text($d, "GENEL TOPLAM: 405,50 TL", ["align" => "right", "bold" => 1, "size" => 13, "color" => "#0a7d3c"]);
+$d = doc_text($d, "Teşekkür ederiz, tekrar bekleriz. Uzun açıklama metinleri otomatik olarak satırlara bölünür; sayfa dolunca kendiliğinden yeni sayfaya geçer.", ["size" => 10]);
+
+file::put("fatura.pdf", doc_render($d));
+print("wrote fatura.pdf");
+
+// ── The one-liner, for quick text:
+file::put("hello.pdf", pdf("Merhaba LOOK — çğşıöü"));
+print("wrote hello.pdf");
+
+// ── Low-level positioned ops are still there (absolute x/y), and pair with the
+//    qr / barcode packages via pdf_matrix / pdf_bars — see those packages' examples.

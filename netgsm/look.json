@@ -1,0 +1,9 @@
+{
+  "description": "Netgsm SMS — full surface (send, bulk, schedule, cancel, delivery report, sender-header list, inbox, remaining credit) over the Netgsm REST v2 + classic APIs with HTTP Basic auth. Turkish rides in the JSON body (no URL-encoding pitfalls). Built from Netgsm's official SDK (endpoints, auth and body shapes matched to it) and exercised against a mock; not yet exercised against a live account — one real send closes that gap.",
+  "tags": ["sms", "netgsm", "notification", "turkey"],
+  "icon": "📱",
+  "color": "navy",
+  "use": "use \"pkg/netgsm\"",
+  "version": "1.0.0",
+  "author": "codlook"
+}

@@ -1,0 +1,619 @@
+use array;
+use crypto;
+use math;
+use string;
+
+// qr — QR Code generator for LOOK, pure LOOK (no external service, no native code).
+// Byte-mode encoding (any UTF-8 text / URL), automatic version selection, Reed-Solomon
+// error correction over GF(2^8), full function-pattern layout and spec mask selection,
+// rendered to a self-contained SVG string. Ported from Project Nayuki's QR Code generator
+// (MIT) and verified module-for-module against it.
+//
+//   qr($text)                  -> string   SVG with sensible defaults (the easy one-liner)
+//   qr_svg($text, $ecc, $opts) -> string   SVG with ECC + styling control
+//   qr_matrix($text, $ecc)     -> assoc     ["size" => n, "modules" => n×n array of 0/1]
+//
+// $ecc is "L" | "M" | "Q" | "H" (default "M"). $opts (assoc, all optional):
+//   "width" / "height" => displayed pixel size (the SVG scales to fit; default: natural)
+//   "scale"  => module pixel size when width/height are not given (default 8)
+//   "border" => quiet-zone modules (default 4, the spec minimum)
+//   "dark"   => dark color (default "#000")   "light" => light color (default "#fff")
+
+// ── ECC tables (indexed [ecl_ordinal][version], version 0 is padding) ──────────
+function qr__ecc_cw_per_block() {
+    return [
+        [-1,7,10,15,20,26,18,20,24,30,18,20,24,26,30,22,24,28,30,28,28,28,28,30,30,26,28,30,30,30,30,30,30,30,30,30,30,30,30,30,30],
+        [-1,10,16,26,18,24,16,18,22,22,26,30,22,22,24,24,28,28,26,26,26,26,28,28,28,28,28,28,28,28,28,28,28,28,28,28,28,28,28,28,28],
+        [-1,13,22,18,26,18,24,18,22,20,24,28,26,24,20,30,24,28,28,26,30,28,30,30,30,30,28,30,30,30,30,30,30,30,30,30,30,30,30,30,30],
+        [-1,17,28,22,16,22,28,26,26,24,28,24,28,22,24,24,30,28,28,26,28,30,24,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30]
+    ];
+}
+function qr__ecc_blocks() {
+    return [
+        [-1,1,1,1,1,1,2,2,2,2,4,4,4,4,4,6,6,6,6,7,8,8,9,9,10,12,12,12,13,14,15,16,17,18,19,19,20,21,22,24,25],
+        [-1,1,1,1,2,2,4,4,4,5,5,5,8,9,9,10,10,11,13,14,16,17,17,18,20,21,23,25,26,28,29,31,33,35,37,38,40,43,45,47,49],
+        [-1,1,1,2,2,4,4,6,6,8,8,8,10,12,16,12,17,16,18,21,20,23,23,25,27,29,34,34,35,38,40,43,45,48,51,53,56,59,62,65,68],
+        [-1,1,1,2,4,4,4,5,6,8,8,11,11,16,16,18,16,19,21,25,25,25,34,30,32,35,37,40,42,45,48,51,54,57,60,63,66,70,74,77,81]
+    ];
+}
+// formatbits for L/M/Q/H (ordinal 0..3)
+function qr__ecc_formatbits($ord) {
+    if ($ord == 0) { return 1; }
+    if ($ord == 1) { return 0; }
+    if ($ord == 2) { return 3; }
+    return 2;
+}
+function qr__ecl_ord($ecc) {
+    if ($ecc == "L") { return 0; }
+    if ($ecc == "Q") { return 2; }
+    if ($ecc == "H") { return 3; }
+    return 1;
+}
+
+// ── integer helpers ────────────────────────────────────────────────────────────
+function qr__idiv($a, $b) { return math::floor($a / $b); }
+
+// bytes of a string as an array of ints (LOOK has no ord(): bridge via hex_encode)
+function qr__bytes($text) {
+    $hex = crypto::hex_encode($text);
+    $out = [];
+    $i = 0;
+    $n = string::len($hex);
+    while ($i < $n) {
+        $out = array::push($out, qr__hex2(string::substr($hex, $i, 2)));
+        $i = $i + 2;
+    }
+    return $out;
+}
+function qr__hexval($c) {
+    if ($c == "0") { return 0; } if ($c == "1") { return 1; } if ($c == "2") { return 2; }
+    if ($c == "3") { return 3; } if ($c == "4") { return 4; } if ($c == "5") { return 5; }
+    if ($c == "6") { return 6; } if ($c == "7") { return 7; } if ($c == "8") { return 8; }
+    if ($c == "9") { return 9; } if ($c == "a") { return 10; } if ($c == "b") { return 11; }
+    if ($c == "c") { return 12; } if ($c == "d") { return 13; } if ($c == "e") { return 14; }
+    return 15;
+}
+function qr__hex2($pair) {
+    return qr__hexval(string::substr($pair, 0, 1)) * 16 + qr__hexval(string::substr($pair, 1, 1));
+}
+
+// ── Reed-Solomon over GF(2^8), modulus 0x11D ───────────────────────────────────
+function qr__rs_multiply($x, $y) {
+    $z = 0;
+    $i = 7;
+    while ($i >= 0) {
+        $z = ($z << 1) ^ (($z >> 7) * 0x11D);
+        $z = $z ^ ((($y >> $i) & 1) * $x);
+        $i = $i - 1;
+    }
+    return $z & 255;
+}
+function qr__rs_divisor($degree) {
+    $result = [];
+    $i = 0;
+    while ($i < $degree - 1) { $result = array::push($result, 0); $i = $i + 1; }
+    $result = array::push($result, 1);
+    $root = 1;
+    $i = 0;
+    while ($i < $degree) {
+        $j = 0;
+        while ($j < $degree) {
+            $result[$j] = qr__rs_multiply($result[$j], $root);
+            if ($j + 1 < $degree) { $result[$j] = $result[$j] ^ $result[$j + 1]; }
+            $j = $j + 1;
+        }
+        $root = qr__rs_multiply($root, 2);
+        $i = $i + 1;
+    }
+    return $result;
+}
+function qr__rs_remainder($data, $divisor) {
+    $dlen = count($divisor);
+    $result = [];
+    $i = 0;
+    while ($i < $dlen) { $result = array::push($result, 0); $i = $i + 1; }
+    $di = 0;
+    $n = count($data);
+    while ($di < $n) {
+        $factor = $data[$di] ^ $result[0];
+        // shift result left by one (drop [0], append 0)
+        $result = array::slice($result, 1, $dlen - 1);
+        $result = array::push($result, 0);
+        $i = 0;
+        while ($i < $dlen) {
+            $result[$i] = $result[$i] ^ qr__rs_multiply($divisor[$i], $factor);
+            $i = $i + 1;
+        }
+        $di = $di + 1;
+    }
+    return $result;
+}
+
+// ── capacity ───────────────────────────────────────────────────────────────────
+function qr__num_raw_data_modules($ver) {
+    $result = (16 * $ver + 128) * $ver + 64;
+    if ($ver >= 2) {
+        $numalign = qr__idiv($ver, 7) + 2;
+        $result = $result - ((25 * $numalign - 10) * $numalign - 55);
+        if ($ver >= 7) { $result = $result - 36; }
+    }
+    return $result;
+}
+function qr__num_data_codewords($ver, $ord) {
+    $ecc_cw = qr__ecc_cw_per_block();
+    $ecc_bl = qr__ecc_blocks();
+    return qr__idiv(qr__num_raw_data_modules($ver), 8) - $ecc_cw[$ord][$ver] * $ecc_bl[$ord][$ver];
+}
+function qr__charcountbits($ver) {
+    if ($ver <= 9) { return 8; }
+    return 16;
+}
+
+// ── bit writer → data codewords ────────────────────────────────────────────────
+function qr__put($w, $val, $n) {
+    $i = $n - 1;
+    while ($i >= 0) {
+        $w["acc"] = ($w["acc"] << 1) | (($val >> $i) & 1);
+        $w["nbits"] = $w["nbits"] + 1;
+        if ($w["nbits"] == 8) {
+            $w["cw"] = array::push($w["cw"], $w["acc"]);
+            $w["acc"] = 0;
+            $w["nbits"] = 0;
+        }
+        $i = $i - 1;
+    }
+    return $w;
+}
+
+// ── main encoder: text -> ["version","size","ord","data_codewords"] ─────────────
+function qr__encode_data($text, $ord) {
+    $bytes = qr__bytes($text);
+    $numchars = count($bytes);
+    // choose smallest version that fits
+    $version = 1;
+    $usedbits = 0;
+    while ($version <= 40) {
+        $cap = qr__num_data_codewords($version, $ord) * 8;
+        $usedbits = 4 + qr__charcountbits($version) + $numchars * 8;
+        if ($usedbits <= $cap) { break; }
+        $version = $version + 1;
+    }
+    $capcw = qr__num_data_codewords($version, $ord);
+    $capbits = $capcw * 8;
+    $w = ["cw" => [], "acc" => 0, "nbits" => 0];
+    $w = qr__put($w, 4, 4);                          // byte mode indicator
+    $w = qr__put($w, $numchars, qr__charcountbits($version));
+    $bi = 0;
+    while ($bi < $numchars) { $w = qr__put($w, $bytes[$bi], 8); $bi = $bi + 1; }
+    // terminator
+    $totalbits = count($w["cw"]) * 8 + $w["nbits"];
+    $term = 4;
+    if ($capbits - $totalbits < 4) { $term = $capbits - $totalbits; }
+    $w = qr__put($w, 0, $term);
+    // pad to byte boundary
+    while ($w["nbits"] != 0) { $w = qr__put($w, 0, 1); }
+    // pad bytes 0xEC / 0x11
+    $pad = 236;
+    while (count($w["cw"]) < $capcw) {
+        $w = qr__put($w, $pad, 8);
+        if ($pad == 236) { $pad = 17; } else { $pad = 236; }
+    }
+    return ["version" => $version, "size" => $version * 4 + 17, "ord" => $ord, "cw" => $w["cw"]];
+}
+
+// ── add ECC + interleave blocks ────────────────────────────────────────────────
+function qr__add_ecc($version, $ord, $data) {
+    $ecc_cw = qr__ecc_cw_per_block();
+    $ecc_bl = qr__ecc_blocks();
+    $numblocks = $ecc_bl[$ord][$version];
+    $blockecclen = $ecc_cw[$ord][$version];
+    $rawcw = qr__idiv(qr__num_raw_data_modules($version), 8);
+    $numshort = $numblocks - ($rawcw % $numblocks);
+    $shortlen = qr__idiv($rawcw, $numblocks);
+    $rsdiv = qr__rs_divisor($blockecclen);
+    $blocks = [];
+    $k = 0;
+    $i = 0;
+    while ($i < $numblocks) {
+        $datlen = $shortlen - $blockecclen;
+        if ($i >= $numshort) { $datlen = $datlen + 1; }
+        $dat = array::slice($data, $k, $datlen);
+        $k = $k + $datlen;
+        $ecc = qr__rs_remainder($dat, $rsdiv);
+        if ($i < $numshort) { $dat = array::push($dat, 0); }   // padding placeholder
+        // block = dat + ecc
+        $blk = $dat;
+        $ei = 0;
+        while ($ei < count($ecc)) { $blk = array::push($blk, $ecc[$ei]); $ei = $ei + 1; }
+        $blocks = array::push($blocks, $blk);
+        $i = $i + 1;
+    }
+    // interleave
+    $result = [];
+    $collen = count($blocks[0]);
+    $ci = 0;
+    while ($ci < $collen) {
+        $j = 0;
+        while ($j < $numblocks) {
+            if (($ci != $shortlen - $blockecclen) || ($j >= $numshort)) {
+                $result = array::push($result, $blocks[$j][$ci]);
+            }
+            $j = $j + 1;
+        }
+        $ci = $ci + 1;
+    }
+    return $result;
+}
+
+// ── grid helpers ────────────────────────────────────────────────────────────────
+function qr__new_grid($size) {
+    $g = [];
+    $y = 0;
+    while ($y < $size) {
+        $row = [];
+        $x = 0;
+        while ($x < $size) { $row = array::push($row, 0); $x = $x + 1; }
+        $g = array::push($g, $row);
+        $y = $y + 1;
+    }
+    return $g;
+}
+
+// ── alignment pattern positions ─────────────────────────────────────────────────
+function qr__align_positions($version, $size) {
+    if ($version == 1) { return []; }
+    $numalign = qr__idiv($version, 7) + 2;
+    $step = qr__idiv($version * 8 + $numalign * 3 + 5, $numalign * 4 - 4) * 2;
+    $res = [];
+    $i = 0;
+    while ($i < $numalign - 1) {
+        $res = array::push($res, $size - 7 - $i * $step);
+        $i = $i + 1;
+    }
+    $res = array::push($res, 6);
+    // reverse
+    $rev = [];
+    $j = count($res) - 1;
+    while ($j >= 0) { $rev = array::push($rev, $res[$j]); $j = $j - 1; }
+    return $rev;
+}
+
+// ── mask pattern value ──────────────────────────────────────────────────────────
+function qr__mask_val($m, $x, $y) {
+    if ($m == 0) { return ($x + $y) % 2; }
+    if ($m == 1) { return $y % 2; }
+    if ($m == 2) { return $x % 3; }
+    if ($m == 3) { return ($x + $y) % 3; }
+    if ($m == 4) { return (qr__idiv($x, 3) + qr__idiv($y, 2)) % 2; }
+    if ($m == 5) { return ($x * $y) % 2 + ($x * $y) % 3; }
+    if ($m == 6) { return (($x * $y) % 2 + ($x * $y) % 3) % 2; }
+    return (($x + $y) % 2 + ($x * $y) % 3) % 2;
+}
+
+// get bit i (from LSB) of an int
+function qr__getbit($v, $i) { return ($v >> $i) & 1; }
+
+// ── drawing (q = ["size","mod","fn"], helpers mutate q["mod"]/q["fn"] and return q) ──
+function qr__set($q, $x, $y, $d) {
+    $q["mod"][$y][$x] = $d;
+    $q["fn"][$y][$x] = 1;
+    return $q;
+}
+function qr__draw_finder($q, $cx, $cy) {
+    $size = $q["size"];
+    $dy = 0 - 4;
+    while ($dy <= 4) {
+        $dx = 0 - 4;
+        while ($dx <= 4) {
+            $xx = $cx + $dx;
+            $yy = $cy + $dy;
+            if ($xx >= 0 && $xx < $size && $yy >= 0 && $yy < $size) {
+                $cheb = math::abs($dx);
+                if (math::abs($dy) > $cheb) { $cheb = math::abs($dy); }
+                $d = 1;
+                if ($cheb == 2 || $cheb == 4) { $d = 0; }
+                $q = qr__set($q, $xx, $yy, $d);
+            }
+            $dx = $dx + 1;
+        }
+        $dy = $dy + 1;
+    }
+    return $q;
+}
+function qr__draw_align($q, $cx, $cy) {
+    $dy = 0 - 2;
+    while ($dy <= 2) {
+        $dx = 0 - 2;
+        while ($dx <= 2) {
+            $cheb = math::abs($dx);
+            if (math::abs($dy) > $cheb) { $cheb = math::abs($dy); }
+            $d = 1;
+            if ($cheb == 1) { $d = 0; }
+            $q = qr__set($q, $cx + $dx, $cy + $dy, $d);
+            $dx = $dx + 1;
+        }
+        $dy = $dy + 1;
+    }
+    return $q;
+}
+function qr__draw_format($q, $mask, $ord) {
+    $size = $q["size"];
+    $data = (qr__ecc_formatbits($ord) << 3) | $mask;
+    $rem = $data;
+    $c = 0;
+    while ($c < 10) { $rem = ($rem << 1) ^ (($rem >> 9) * 0x537); $c = $c + 1; }
+    $bits = (($data << 10) | $rem) ^ 0x5412;
+    $i = 0;
+    while ($i < 6) { $q = qr__set($q, 8, $i, qr__getbit($bits, $i)); $i = $i + 1; }
+    $q = qr__set($q, 8, 7, qr__getbit($bits, 6));
+    $q = qr__set($q, 8, 8, qr__getbit($bits, 7));
+    $q = qr__set($q, 7, 8, qr__getbit($bits, 8));
+    $i = 9;
+    while ($i < 15) { $q = qr__set($q, 14 - $i, 8, qr__getbit($bits, $i)); $i = $i + 1; }
+    $i = 0;
+    while ($i < 8) { $q = qr__set($q, $size - 1 - $i, 8, qr__getbit($bits, $i)); $i = $i + 1; }
+    $i = 8;
+    while ($i < 15) { $q = qr__set($q, 8, $size - 15 + $i, qr__getbit($bits, $i)); $i = $i + 1; }
+    $q = qr__set($q, 8, $size - 8, 1);
+    return $q;
+}
+function qr__draw_version($q, $version) {
+    if ($version < 7) { return $q; }
+    $size = $q["size"];
+    $rem = $version;
+    $c = 0;
+    while ($c < 12) { $rem = ($rem << 1) ^ (($rem >> 11) * 0x1F25); $c = $c + 1; }
+    $bits = ($version << 12) | $rem;
+    $i = 0;
+    while ($i < 18) {
+        $bit = qr__getbit($bits, $i);
+        $a = $size - 11 + $i % 3;
+        $b = qr__idiv($i, 3);
+        $q = qr__set($q, $a, $b, $bit);
+        $q = qr__set($q, $b, $a, $bit);
+        $i = $i + 1;
+    }
+    return $q;
+}
+function qr__draw_functions($q, $version, $ord) {
+    $size = $q["size"];
+    $i = 0;
+    while ($i < $size) {
+        $d = 0;
+        if ($i % 2 == 0) { $d = 1; }
+        $q = qr__set($q, 6, $i, $d);
+        $q = qr__set($q, $i, 6, $d);
+        $i = $i + 1;
+    }
+    $q = qr__draw_finder($q, 3, 3);
+    $q = qr__draw_finder($q, $size - 4, 3);
+    $q = qr__draw_finder($q, 3, $size - 4);
+    $pos = qr__align_positions($version, $size);
+    $na = count($pos);
+    $ai = 0;
+    while ($ai < $na) {
+        $aj = 0;
+        while ($aj < $na) {
+            $skip = 0;
+            if ($ai == 0 && $aj == 0) { $skip = 1; }
+            if ($ai == 0 && $aj == $na - 1) { $skip = 1; }
+            if ($ai == $na - 1 && $aj == 0) { $skip = 1; }
+            if ($skip == 0) { $q = qr__draw_align($q, $pos[$ai], $pos[$aj]); }
+            $aj = $aj + 1;
+        }
+        $ai = $ai + 1;
+    }
+    $q = qr__draw_format($q, 0, $ord);
+    $q = qr__draw_version($q, $version);
+    return $q;
+}
+function qr__draw_codewords($q, $data) {
+    $size = $q["size"];
+    $nbits = count($data) * 8;
+    $i = 0;
+    $base = $size - 1;
+    while ($base > 0) {
+        $rcol = $base;
+        if ($rcol <= 6) { $rcol = $rcol - 1; }
+        $vert = 0;
+        while ($vert < $size) {
+            $j = 0;
+            while ($j < 2) {
+                $x = $rcol - $j;
+                $upward = ((($rcol + 1) & 2) == 0);
+                $y = $vert;
+                if ($upward) { $y = $size - 1 - $vert; }
+                if ($q["fn"][$y][$x] == 0 && $i < $nbits) {
+                    $q["mod"][$y][$x] = qr__getbit($data[$i >> 3], 7 - ($i & 7));
+                    $i = $i + 1;
+                }
+                $j = $j + 1;
+            }
+            $vert = $vert + 1;
+        }
+        $base = $base - 2;
+    }
+    return $q;
+}
+function qr__apply_mask($q, $mask) {
+    $size = $q["size"];
+    $y = 0;
+    while ($y < $size) {
+        $x = 0;
+        while ($x < $size) {
+            if ($q["fn"][$y][$x] == 0 && qr__mask_val($mask, $x, $y) == 0) {
+                $q["mod"][$y][$x] = $q["mod"][$y][$x] ^ 1;
+            }
+            $x = $x + 1;
+        }
+        $y = $y + 1;
+    }
+    return $q;
+}
+
+// ── penalty scoring (for automatic mask selection) ──────────────────────────────
+function qr__hist_push($rh, $v, $size) {
+    if ($rh[0] == 0) { $v = $v + $size; }
+    return [$v, $rh[0], $rh[1], $rh[2], $rh[3], $rh[4], $rh[5]];
+}
+function qr__count_patterns($rh) {
+    $n = $rh[1];
+    $core = 0;
+    if ($n > 0 && $rh[2] == $n && $rh[4] == $n && $rh[5] == $n && $rh[3] == $n * 3) { $core = 1; }
+    $c = 0;
+    if ($core == 1 && $rh[0] >= $n * 4 && $rh[6] >= $n) { $c = $c + 1; }
+    if ($core == 1 && $rh[6] >= $n * 4 && $rh[0] >= $n) { $c = $c + 1; }
+    return $c;
+}
+function qr__penalty($q) {
+    $size = $q["size"];
+    $mod = $q["mod"];
+    $result = 0;
+    $y = 0;
+    while ($y < $size) {
+        $runcolor = 0;
+        $runx = 0;
+        $rh = [0, 0, 0, 0, 0, 0, 0];
+        $x = 0;
+        while ($x < $size) {
+            if ($mod[$y][$x] == $runcolor) {
+                $runx = $runx + 1;
+                if ($runx == 5) { $result = $result + 3; }
+                else { if ($runx > 5) { $result = $result + 1; } }
+            } else {
+                $rh = qr__hist_push($rh, $runx, $size);
+                if ($runcolor == 0) { $result = $result + qr__count_patterns($rh) * 40; }
+                $runcolor = $mod[$y][$x];
+                $runx = 1;
+            }
+            $x = $x + 1;
+        }
+        if ($runcolor == 1) { $rh = qr__hist_push($rh, $runx, $size); $runx = 0; }
+        $runx = $runx + $size;
+        $rh = qr__hist_push($rh, $runx, $size);
+        $result = $result + qr__count_patterns($rh) * 40;
+        $y = $y + 1;
+    }
+    $x = 0;
+    while ($x < $size) {
+        $runcolor = 0;
+        $runy = 0;
+        $rh = [0, 0, 0, 0, 0, 0, 0];
+        $y = 0;
+        while ($y < $size) {
+            if ($mod[$y][$x] == $runcolor) {
+                $runy = $runy + 1;
+                if ($runy == 5) { $result = $result + 3; }
+                else { if ($runy > 5) { $result = $result + 1; } }
+            } else {
+                $rh = qr__hist_push($rh, $runy, $size);
+                if ($runcolor == 0) { $result = $result + qr__count_patterns($rh) * 40; }
+                $runcolor = $mod[$y][$x];
+                $runy = 1;
+            }
+            $y = $y + 1;
+        }
+        if ($runcolor == 1) { $rh = qr__hist_push($rh, $runy, $size); $runy = 0; }
+        $runy = $runy + $size;
+        $rh = qr__hist_push($rh, $runy, $size);
+        $result = $result + qr__count_patterns($rh) * 40;
+        $x = $x + 1;
+    }
+    $dark = 0;
+    $y = 0;
+    while ($y < $size) {
+        $x = 0;
+        while ($x < $size) {
+            if ($mod[$y][$x] == 1) { $dark = $dark + 1; }
+            if ($y < $size - 1 && $x < $size - 1) {
+                if ($mod[$y][$x] == $mod[$y][$x + 1] && $mod[$y][$x] == $mod[$y + 1][$x] && $mod[$y][$x] == $mod[$y + 1][$x + 1]) {
+                    $result = $result + 3;
+                }
+            }
+            $x = $x + 1;
+        }
+        $y = $y + 1;
+    }
+    $total = $size * $size;
+    $k = qr__idiv(math::abs($dark * 20 - $total * 10) + $total - 1, $total) - 1;
+    $result = $result + $k * 10;
+    return $result;
+}
+
+// ── public: qr_matrix / qr_svg ──────────────────────────────────────────────────
+function qr_matrix($text, $ecc) {
+    $ord = qr__ecl_ord($ecc);
+    $enc = qr__encode_data($text, $ord);
+    $version = $enc["version"];
+    $size = $enc["size"];
+    $allcw = qr__add_ecc($version, $ord, $enc["cw"]);
+    $q = ["size" => $size, "mod" => qr__new_grid($size), "fn" => qr__new_grid($size)];
+    $q = qr__draw_functions($q, $version, $ord);
+    $q = qr__draw_codewords($q, $allcw);
+    $bestmask = 0;
+    $bestpen = 0;
+    $m = 0;
+    while ($m < 8) {
+        $q = qr__apply_mask($q, $m);
+        $q = qr__draw_format($q, $m, $ord);
+        $pen = qr__penalty($q);
+        if ($m == 0 || $pen < $bestpen) { $bestpen = $pen; $bestmask = $m; }
+        $q = qr__apply_mask($q, $m);
+        $m = $m + 1;
+    }
+    $q = qr__apply_mask($q, $bestmask);
+    $q = qr__draw_format($q, $bestmask, $ord);
+    return ["size" => $size, "version" => $version, "mask" => $bestmask, "modules" => $q["mod"]];
+}
+
+// qr($text) -> SVG string with sensible defaults (ECC M, scale 8, black on white).
+// The one-liner for the common case; use qr_svg for ECC/styling control.
+function qr($text) {
+    return qr_svg($text, "M", null);
+}
+
+function qr_svg($text, $ecc, $opts) {
+    if ($ecc == null) { $ecc = "M"; }
+    $scale = 8;
+    $border = 4;
+    $dark = "#000";
+    $light = "#fff";
+    $width = 0 - 1;
+    $height = 0 - 1;
+    if ($opts != null) {
+        if ($opts["scale"] != null)  { $scale = $opts["scale"]; }
+        if ($opts["border"] != null) { $border = $opts["border"]; }
+        if ($opts["dark"] != null)   { $dark = $opts["dark"]; }
+        if ($opts["light"] != null)  { $light = $opts["light"]; }
+        if ($opts["width"] != null)  { $width = $opts["width"]; }
+        if ($opts["height"] != null) { $height = $opts["height"]; }
+    }
+    $r = qr_matrix($text, $ecc);
+    $size = $r["size"];
+    $mod = $r["modules"];
+    $dim = ($size + $border * 2) * $scale;
+    // viewBox stays in module coordinates; width/height (if given) set the displayed
+    // pixel size and the vector scales to fit. Default: the natural module size.
+    $w = $dim;
+    $h = $dim;
+    if ($width > 0)  { $w = $width; }
+    if ($height > 0) { $h = $height; }
+    $svg = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"" . $w . "\" height=\"" . $h . "\" viewBox=\"0 0 " . $dim . " " . $dim . "\" shape-rendering=\"crispEdges\">";
+    $svg = $svg . "<rect width=\"" . $dim . "\" height=\"" . $dim . "\" fill=\"" . $light . "\"/>";
+    $svg = $svg . "<path fill=\"" . $dark . "\" d=\"";
+    $y = 0;
+    while ($y < $size) {
+        $x = 0;
+        while ($x < $size) {
+            if ($mod[$y][$x] == 1) {
+                $px = ($x + $border) * $scale;
+                $py = ($y + $border) * $scale;
+                $svg = $svg . "M" . $px . " " . $py . "h" . $scale . "v" . $scale . "h-" . $scale . "z";
+            }
+            $x = $x + 1;
+        }
+        $y = $y + 1;
+    }
+    $svg = $svg . "\"/></svg>";
+    return $svg;
+}

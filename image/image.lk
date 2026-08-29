@@ -1,0 +1,473 @@
+use array;
+use string;
+use crypto;
+use math;
+
+// image — a small PNG/BMP image toolkit for LOOK, pure LOOK (no native code, no service).
+// Decode PNG (it carries its own RFC-1951 inflate), resize, crop, and re-encode to PNG or
+// export to BMP. Made for small-to-medium images: logos, icons, thumbnails, QR/graphics.
+//
+//   image_load($binary)                 -> img   decode a PNG   (img = w/h/ch/pix)
+//   image_resize($img, $w, $h)          -> img   nearest-neighbour resize
+//   image_crop($img, $x, $y, $w, $h)    -> img   crop a region
+//   image_size($img)                    -> [w, h]
+//   image_png($img)                     -> string(binary)   encode PNG (write with file::put)
+//   image_bmp($img)                     -> string(binary)   export 24-bit BMP (changes extension)
+//
+// Handles 8-bit PNG (grayscale / RGB / RGBA). NOT JPEG — a JPEG codec isn't practical in pure
+// LOOK; process photos with a native/external tool. Speed is fine for small images, slow for
+// megapixels. PNG output is currently uncompressed (valid but not size-reduced) — shrink by
+// resizing down.
+
+// inflate — RFC 1951 raw DEFLATE decompressor in pure LOOK (puff-style Huffman decode).
+//   inflate($bytes, $outsize) -> array of decoded byte ints
+// $bytes: array of compressed byte ints. $outsize: expected uncompressed size (from the ZIP).
+
+function inf__zeros($n) {
+    $a = [0];
+    while (count($a) < $n) { $a = array::flatten([$a, $a]); }
+    return array::slice($a, 0, $n);
+}
+// length base/extra for symbols 257..285
+function inf__lenbase() { return [3,4,5,6,7,8,9,10,11,13,15,17,19,23,27,31,35,43,51,59,67,83,99,115,131,163,195,227,258]; }
+function inf__lenext()  { return [0,0,0,0,0,0,0,0,1,1,1,1,2,2,2,2,3,3,3,3,4,4,4,4,5,5,5,5,0]; }
+function inf__distbase(){ return [1,2,3,4,5,7,9,13,17,25,33,49,65,97,129,193,257,385,513,769,1025,1537,2049,3073,4097,6145,8193,12289,16385,24577]; }
+function inf__distext() { return [0,0,0,0,1,1,2,2,3,3,4,4,5,5,6,6,7,7,8,8,9,9,10,10,11,11,12,12,13,13]; }
+function inf__clorder() { return [16,17,18,0,8,7,9,6,10,5,11,4,12,3,13,2,14,1,15]; }
+
+// read $n bits LSB-first -> [value, newpos]
+function inf__getbits($bytes, $pos, $n) {
+    $v = 0;
+    $i = 0;
+    while ($i < $n) {
+        $v = $v | ((($bytes[$pos >> 3] >> ($pos & 7)) & 1) << $i);
+        $pos = $pos + 1;
+        $i = $i + 1;
+    }
+    return [$v, $pos];
+}
+// build canonical Huffman from code lengths -> ["count"=>.., "symbol"=>..]
+function inf__build($length, $n) {
+    $count = inf__zeros(16);
+    $i = 0;
+    while ($i < $n) { $count[$length[$i]] = $count[$length[$i]] + 1; $i = $i + 1; }
+    $count[0] = 0;
+    $offs = inf__zeros(16);
+    $len = 1;
+    while ($len < 15) { $offs[$len + 1] = $offs[$len] + $count[$len]; $len = $len + 1; }
+    $symbol = inf__zeros($n);
+    $s = 0;
+    while ($s < $n) {
+        if ($length[$s] != 0) {
+            $symbol[$offs[$length[$s]]] = $s;
+            $offs[$length[$s]] = $offs[$length[$s]] + 1;
+        }
+        $s = $s + 1;
+    }
+    return ["count" => $count, "symbol" => $symbol];
+}
+// decode one symbol -> [symbol, newpos]
+function inf__decode($bytes, $pos, $h) {
+    $count = $h["count"];
+    $symbol = $h["symbol"];
+    $code = 0;
+    $first = 0;
+    $index = 0;
+    $len = 1;
+    while ($len <= 15) {
+        $code = $code | (($bytes[$pos >> 3] >> ($pos & 7)) & 1);
+        $pos = $pos + 1;
+        $cnt = $count[$len];
+        if ($code - $first < $cnt) { return [$symbol[$index + $code - $first], $pos]; }
+        $index = $index + $cnt;
+        $first = ($first + $cnt) << 1;
+        $code = $code << 1;
+        $len = $len + 1;
+    }
+    return [0 - 1, $pos];
+}
+// fixed Huffman tables
+function inf__fixed_litlen() {
+    $l = inf__zeros(288);
+    $i = 0;
+    while ($i < 288) {
+        if ($i < 144) { $l[$i] = 8; } else { if ($i < 256) { $l[$i] = 9; } else { if ($i < 280) { $l[$i] = 7; } else { $l[$i] = 8; } } }
+        $i = $i + 1;
+    }
+    return inf__build($l, 288);
+}
+function inf__fixed_dist() {
+    $l = inf__zeros(30);
+    $i = 0;
+    while ($i < 30) { $l[$i] = 5; $i = $i + 1; }
+    return inf__build($l, 30);
+}
+
+// decode one block body given lit/len + dist Huffman tables. returns [out, outpos, pos]
+function inf__block($bytes, $pos, $out, $outpos, $lh, $dh) {
+    $lenbase = inf__lenbase();
+    $lenext = inf__lenext();
+    $distbase = inf__distbase();
+    $distext = inf__distext();
+    $done = 0;
+    while ($done == 0) {
+        $r = inf__decode($bytes, $pos, $lh);
+        $sym = $r[0];
+        $pos = $r[1];
+        if ($sym == 256) { $done = 1; }
+        else {
+            if ($sym < 256) {
+                $out[$outpos] = $sym;
+                $outpos = $outpos + 1;
+            } else {
+                $si = $sym - 257;
+                $rb = inf__getbits($bytes, $pos, $lenext[$si]);
+                $length = $lenbase[$si] + $rb[0];
+                $pos = $rb[1];
+                $rd = inf__decode($bytes, $pos, $dh);
+                $dsym = $rd[0];
+                $pos = $rd[1];
+                $re = inf__getbits($bytes, $pos, $distext[$dsym]);
+                $dist = $distbase[$dsym] + $re[0];
+                $pos = $re[1];
+                $k = 0;
+                while ($k < $length) {
+                    $out[$outpos] = $out[$outpos - $dist];
+                    $outpos = $outpos + 1;
+                    $k = $k + 1;
+                }
+            }
+        }
+    }
+    return [$out, $outpos, $pos];
+}
+
+function inflate($bytes, $outsize) {
+    $out = inf__zeros($outsize);
+    $outpos = 0;
+    $pos = 0;
+    $clord = inf__clorder();
+    $final = 0;
+    while ($final == 0) {
+        $rf = inf__getbits($bytes, $pos, 1); $final = $rf[0]; $pos = $rf[1];
+        $rt = inf__getbits($bytes, $pos, 2); $btype = $rt[0]; $pos = $rt[1];
+        if ($btype == 0) {
+            // stored: skip to byte boundary
+            $pos = ($pos + 7) - (($pos + 7) % 8);
+            $rl = inf__getbits($bytes, $pos, 16); $len = $rl[0]; $pos = $rl[1];
+            $rn = inf__getbits($bytes, $pos, 16); $pos = $rn[1];
+            $k = 0;
+            while ($k < $len) {
+                $out[$outpos] = ($bytes[$pos >> 3]);
+                $pos = $pos + 8;
+                $outpos = $outpos + 1;
+                $k = $k + 1;
+            }
+        } else {
+            $lh = null;
+            $dh = null;
+            if ($btype == 1) {
+                $lh = inf__fixed_litlen();
+                $dh = inf__fixed_dist();
+            } else {
+                $rh = inf__getbits($bytes, $pos, 5); $hlit = $rh[0] + 257; $pos = $rh[1];
+                $rd = inf__getbits($bytes, $pos, 5); $hdist = $rd[0] + 1; $pos = $rd[1];
+                $rc = inf__getbits($bytes, $pos, 4); $hclen = $rc[0] + 4; $pos = $rc[1];
+                $cll = inf__zeros(19);
+                $i = 0;
+                while ($i < $hclen) {
+                    $rr = inf__getbits($bytes, $pos, 3);
+                    $cll[$clord[$i]] = $rr[0];
+                    $pos = $rr[1];
+                    $i = $i + 1;
+                }
+                $clh = inf__build($cll, 19);
+                // read code lengths for lit/len + dist
+                $all = inf__zeros($hlit + $hdist);
+                $n = 0;
+                while ($n < $hlit + $hdist) {
+                    $rs = inf__decode($bytes, $pos, $clh);
+                    $sym = $rs[0];
+                    $pos = $rs[1];
+                    if ($sym < 16) { $all[$n] = $sym; $n = $n + 1; }
+                    else {
+                        $rep = 0;
+                        $val = 0;
+                        if ($sym == 16) { $rr = inf__getbits($bytes, $pos, 2); $rep = $rr[0] + 3; $pos = $rr[1]; $val = $all[$n - 1]; }
+                        else { if ($sym == 17) { $rr = inf__getbits($bytes, $pos, 3); $rep = $rr[0] + 3; $pos = $rr[1]; }
+                        else { $rr = inf__getbits($bytes, $pos, 7); $rep = $rr[0] + 11; $pos = $rr[1]; } }
+                        $j = 0;
+                        while ($j < $rep) { $all[$n] = $val; $n = $n + 1; $j = $j + 1; }
+                    }
+                }
+                $litl = array::slice($all, 0, $hlit);
+                $distl = array::slice($all, $hlit, $hdist);
+                $lh = inf__build($litl, $hlit);
+                $dh = inf__build($distl, $hdist);
+            }
+            $rb = inf__block($bytes, $pos, $out, $outpos, $lh, $dh);
+            $out = $rb[0];
+            $outpos = $rb[1];
+            $pos = $rb[2];
+        }
+    }
+    return $out;
+}
+
+// ── byte helpers ──────────────────────────────────────────────────────────────
+function img__nib($n) {
+    if ($n < 10) { return "" . $n; }
+    if ($n == 10) { return "a"; } if ($n == 11) { return "b"; } if ($n == 12) { return "c"; }
+    if ($n == 13) { return "d"; } if ($n == 14) { return "e"; }
+    return "f";
+}
+function img__bhex($n) { return img__nib(($n >> 4) & 15) . img__nib($n & 15); }
+function img__hxv($c) {
+    if ($c == "0") { return 0; } if ($c == "1") { return 1; } if ($c == "2") { return 2; }
+    if ($c == "3") { return 3; } if ($c == "4") { return 4; } if ($c == "5") { return 5; }
+    if ($c == "6") { return 6; } if ($c == "7") { return 7; } if ($c == "8") { return 8; }
+    if ($c == "9") { return 9; } if ($c == "a") { return 10; } if ($c == "b") { return 11; }
+    if ($c == "c") { return 12; } if ($c == "d") { return 13; } if ($c == "e") { return 14; }
+    return 15;
+}
+// binary string -> pre-allocated byte array (O(n))
+function img__to_bytes($bin) {
+    $hex = crypto::hex_encode($bin);
+    $n = string::len($hex) / 2;
+    $out = inf__zeros($n);
+    $i = 0;
+    while ($i < $n) {
+        $out[$i] = img__hxv(string::substr($hex, $i * 2, 1)) * 16 + img__hxv(string::substr($hex, $i * 2 + 1, 1));
+        $i = $i + 1;
+    }
+    return $out;
+}
+function img__u32($d, $i) { return ($d[$i] << 24) | ($d[$i + 1] << 16) | ($d[$i + 2] << 8) | $d[$i + 3]; }
+
+// ── PNG decode ────────────────────────────────────────────────────────────────
+// png_decode($bytes) -> ["w"=>.., "h"=>.., "ch"=>3|4, "pix"=>flat byte array (row-major RGB/RGBA)]
+function png_decode($d) {
+    // skip 8-byte signature; walk chunks
+    $p = 8;
+    $w = 0; $h = 0; $ct = 0;
+    $idat = "";               // concatenated IDAT data as hex
+    $n = count($d);
+    while ($p < $n) {
+        $len = img__u32($d, $p);
+        $t0 = $d[$p + 4]; $t1 = $d[$p + 5]; $t2 = $d[$p + 6]; $t3 = $d[$p + 7];
+        $ds = $p + 8;
+        if ($t0 == 73 && $t1 == 72 && $t2 == 68 && $t3 == 82) {     // IHDR
+            $w = img__u32($d, $ds);
+            $h = img__u32($d, $ds + 4);
+            $ct = $d[$ds + 9];
+        }
+        if ($t0 == 73 && $t1 == 68 && $t2 == 65 && $t3 == 84) {     // IDAT
+            $k = 0;
+            while ($k < $len) { $idat = $idat . img__bhex($d[$ds + $k]); $k = $k + 1; }
+        }
+        if ($t0 == 73 && $t1 == 69 && $t2 == 78 && $t3 == 68) { $p = $n; }   // IEND
+        else { $p = $ds + $len + 4; }
+    }
+    $ch = 3;
+    if ($ct == 6) { $ch = 4; }
+    if ($ct == 0) { $ch = 1; }
+    // IDAT is a zlib stream: strip 2-byte header + 4-byte adler -> raw deflate
+    $comphex = string::substr($idat, 4, string::len($idat) - 4 - 8);
+    $cn = string::len($comphex) / 2;
+    $comp = inf__zeros($cn);
+    $i = 0;
+    while ($i < $cn) { $comp[$i] = img__hxv(string::substr($comphex, $i * 2, 1)) * 16 + img__hxv(string::substr($comphex, $i * 2 + 1, 1)); $i = $i + 1; }
+    $stride = $w * $ch;
+    $raw = inflate($comp, $h * ($stride + 1));
+    // unfilter -> pixels
+    $pix = inf__zeros($h * $stride);
+    $y = 0;
+    $rp = 0;                  // read pointer in raw
+    while ($y < $h) {
+        $ft = $raw[$rp]; $rp = $rp + 1;
+        $x = 0;
+        while ($x < $stride) {
+            $val = $raw[$rp];
+            $a = 0;           // left
+            $b = 0;           // up
+            $c = 0;           // upper-left
+            if ($x >= $ch) { $a = $pix[$y * $stride + $x - $ch]; }
+            if ($y > 0) { $b = $pix[($y - 1) * $stride + $x]; }
+            if ($y > 0 && $x >= $ch) { $c = $pix[($y - 1) * $stride + $x - $ch]; }
+            if ($ft == 1) { $val = ($val + $a) & 255; }
+            if ($ft == 2) { $val = ($val + $b) & 255; }
+            if ($ft == 3) { $val = ($val + math::floor(($a + $b) / 2)) & 255; }
+            if ($ft == 4) { $val = ($val + png__paeth($a, $b, $c)) & 255; }
+            $pix[$y * $stride + $x] = $val;
+            $rp = $rp + 1;
+            $x = $x + 1;
+        }
+        $y = $y + 1;
+    }
+    return ["w" => $w, "h" => $h, "ch" => $ch, "pix" => $pix];
+}
+function png__paeth($a, $b, $c) {
+    $p = $a + $b - $c;
+    $pa = $p - $a; if ($pa < 0) { $pa = 0 - $pa; }
+    $pb = $p - $b; if ($pb < 0) { $pb = 0 - $pb; }
+    $pc = $p - $c; if ($pc < 0) { $pc = 0 - $pc; }
+    if ($pa <= $pb && $pa <= $pc) { return $a; }
+    if ($pb <= $pc) { return $b; }
+    return $c;
+}
+
+// ── operations ────────────────────────────────────────────────────────────────
+// image_crop($img, $x, $y, $cw, $chh) -> img
+function image_crop($img, $x, $y, $cw, $chh) {
+    $ch = $img["ch"];
+    $sw = $img["w"];
+    $src = $img["pix"];
+    $out = inf__zeros($cw * $chh * $ch);
+    $ry = 0;
+    while ($ry < $chh) {
+        $rx = 0;
+        while ($rx < $cw) {
+            $soff = (($y + $ry) * $sw + ($x + $rx)) * $ch;
+            $doff = ($ry * $cw + $rx) * $ch;
+            $k = 0;
+            while ($k < $ch) { $out[$doff + $k] = $src[$soff + $k]; $k = $k + 1; }
+            $rx = $rx + 1;
+        }
+        $ry = $ry + 1;
+    }
+    return ["w" => $cw, "h" => $chh, "ch" => $ch, "pix" => $out];
+}
+// image_resize($img, $nw, $nh) -> img  (nearest-neighbour)
+function image_resize($img, $nw, $nh) {
+    $ch = $img["ch"];
+    $sw = $img["w"];
+    $sh = $img["h"];
+    $src = $img["pix"];
+    $out = inf__zeros($nw * $nh * $ch);
+    $ny = 0;
+    while ($ny < $nh) {
+        $sy = math::floor($ny * $sh / $nh);
+        $nx = 0;
+        while ($nx < $nw) {
+            $sx = math::floor($nx * $sw / $nw);
+            $soff = ($sy * $sw + $sx) * $ch;
+            $doff = ($ny * $nw + $nx) * $ch;
+            $k = 0;
+            while ($k < $ch) { $out[$doff + $k] = $src[$soff + $k]; $k = $k + 1; }
+            $nx = $nx + 1;
+        }
+        $ny = $ny + 1;
+    }
+    return ["w" => $nw, "h" => $nh, "ch" => $ch, "pix" => $out];
+}
+
+// ── checksums ─────────────────────────────────────────────────────────────────
+function img__crc_step($c) {
+    $k = 0;
+    while ($k < 8) {
+        if (($c & 1) == 1) { $c = 0xEDB88320 ^ ($c >> 1); } else { $c = $c >> 1; }
+        $k = $k + 1;
+    }
+    return $c;
+}
+// crc32 over a hex string
+function img__crc32_hex($hex) {
+    $crc = 0xFFFFFFFF;
+    $i = 0;
+    $n = string::len($hex) / 2;
+    while ($i < $n) {
+        $b = img__hxv(string::substr($hex, $i * 2, 1)) * 16 + img__hxv(string::substr($hex, $i * 2 + 1, 1));
+        $crc = img__crc_step(($crc ^ $b) & 255) ^ ($crc >> 8);
+        $i = $i + 1;
+    }
+    return $crc ^ 0xFFFFFFFF;
+}
+function img__be32($n) {
+    return img__bhex(($n >> 24) & 255) . img__bhex(($n >> 16) & 255) . img__bhex(($n >> 8) & 255) . img__bhex($n & 255);
+}
+function img__le16($n) { return img__bhex($n & 255) . img__bhex(($n >> 8) & 255); }
+
+// ── PNG encode (store-mode deflate: valid, uncompressed) ────────────────────────
+function image_png($img) {
+    $w = $img["w"]; $h = $img["h"]; $ch = $img["ch"]; $pix = $img["pix"];
+    $stride = $w * $ch;
+    // raw scanlines (filter 0) as a byte array + adler32
+    $rawlen = $h * ($stride + 1);
+    $s1 = 1; $s2 = 0;
+    $rawhex = "";
+    $y = 0;
+    while ($y < $h) {
+        $rawhex = $rawhex . "00";                 // filter: None
+        $s1 = ($s1 + 0) % 65521; $s2 = ($s2 + $s1) % 65521;
+        $x = 0;
+        while ($x < $stride) {
+            $b = $pix[$y * $stride + $x];
+            $rawhex = $rawhex . img__bhex($b);
+            $s1 = ($s1 + $b) % 65521; $s2 = ($s2 + $s1) % 65521;
+            $x = $x + 1;
+        }
+        $y = $y + 1;
+    }
+    $adler = ($s2 << 16) | $s1;
+    // zlib stream: header 7801 + store blocks + adler
+    $zlib = "7801";
+    $pos = 0;
+    while ($pos < $rawlen) {
+        $blk = 65535;
+        if ($rawlen - $pos < $blk) { $blk = $rawlen - $pos; }
+        $final = "00";
+        if ($pos + $blk >= $rawlen) { $final = "01"; }
+        $zlib = $zlib . $final . img__le16($blk) . img__le16(65535 - $blk);
+        $zlib = $zlib . string::substr($rawhex, $pos * 2, $blk * 2);
+        $pos = $pos + $blk;
+    }
+    $zlib = $zlib . img__be32($adler);
+    // IHDR data: w,h,bitdepth 8, colortype, 0,0,0
+    $cti = 2; if ($ch == 4) { $cti = 6; } if ($ch == 1) { $cti = 0; }
+    $ihdr = img__be32($w) . img__be32($h) . "08" . img__bhex($cti) . "000000";
+    // chunk builder: len + type + data + crc
+    $out = "89504e470d0a1a0a";                    // signature
+    $out = $out . img__chunk("49484452", $ihdr);  // IHDR
+    $out = $out . img__chunk("49444154", $zlib);   // IDAT
+    $out = $out . img__chunk("49454e44", "");      // IEND
+    return crypto::hex_decode($out);
+}
+function img__chunk($typehex, $datahex) {
+    $len = string::len($datahex) / 2;
+    $crc = img__crc32_hex($typehex . $datahex);
+    return img__be32($len) . $typehex . $datahex . img__be32($crc);
+}
+
+// ── public: load ────────────────────────────────────────────────────────────────
+// image_load($binary) -> img  (PNG)
+function image_load($bin) {
+    return png_decode(img__to_bytes($bin));
+}
+
+function img__le32($n) {
+    return img__bhex($n & 255) . img__bhex(($n >> 8) & 255) . img__bhex(($n >> 16) & 255) . img__bhex(($n >> 24) & 255);
+}
+// image_bmp($img) -> 24-bit uncompressed BMP bytes (alpha dropped). For PNG->BMP export.
+function image_bmp($img) {
+    $w = $img["w"]; $h = $img["h"]; $ch = $img["ch"]; $pix = $img["pix"];
+    $rowbytes = $w * 3;
+    $pad = (4 - ($rowbytes % 4)) % 4;
+    $imgsize = ($rowbytes + $pad) * $h;
+    $hex = "424d" . img__le32(54 + $imgsize) . "00000000" . img__le32(54);
+    $hex = $hex . img__le32(40) . img__le32($w) . img__le32($h) . "0100" . "1800" . "00000000" . img__le32($imgsize) . "130b0000130b00000000000000000000";
+    $y = $h - 1;
+    while ($y >= 0) {
+        $x = 0;
+        while ($x < $w) {
+            $off = ($y * $w + $x) * $ch;
+            $hex = $hex . img__bhex($pix[$off + 2]) . img__bhex($pix[$off + 1]) . img__bhex($pix[$off]);
+            $x = $x + 1;
+        }
+        $z = 0;
+        while ($z < $pad) { $hex = $hex . "00"; $z = $z + 1; }
+        $y = $y - 1;
+    }
+    return crypto::hex_decode($hex);
+}
+// image_size($img) -> [w, h]
+function image_size($img) { return [$img["w"], $img["h"]]; }

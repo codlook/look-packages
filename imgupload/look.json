@@ -1,0 +1,9 @@
+{
+  "description": "Client-side image optimizer + LOOK upload recipe. A tiny browser script (optimize.js) converts a user's photo to WebP (falling back to JPEG on Safari) with resize + quality — the browser's native codec does the heavy lifting, transparency preserved — then uploads the small result to a LOOK route that stores it securely with the core request::file() + file::store(). No server-side image codec, no native dependency.",
+  "tags": ["image", "webp", "upload", "compression"],
+  "icon": "📷",
+  "color": "navy",
+  "use": "front-end asset (optimize.js) + LOOK route",
+  "version": "1.0.0",
+  "author": "codlook"
+}

@@ -1,0 +1,187 @@
+use http;
+use json;
+use crypto;
+use array;
+use string;
+
+// netgsm — the full Netgsm SMS surface for LOOK, built purely on the core http::,
+// json::, crypto:: and string:: builtins. Every endpoint, the HTTP Basic auth and the
+// body shapes below are matched against Netgsm's official SDK; Turkish text rides inside
+// the JSON body (UTF-8), so there is no URL-encoding pitfall.
+//
+// Config:
+//   netgsm_config($usercode, $password, $header) -> config assoc
+//
+// Sending (REST v2, Basic-auth JSON):
+//   netgsm_send($config, $no, $message)                       -> result   one recipient
+//   netgsm_send_many($config, $no_list, $message)             -> result   many recipients
+//   netgsm_send_scheduled($config, $no_list, $message, $when) -> result   $when = "ddMMyyyyHHmm"
+//   netgsm_cancel($config, $jobid)                            -> result   cancel a scheduled batch
+//
+// Account & reports:
+//   netgsm_headers($config)                        -> data   your approved sender names (msgheader)
+//   netgsm_balance($config)                        -> credit remaining SMS credit
+//   netgsm_report($config, $start, $stop)          -> data   delivery report ("dd.MM.yyyy HH:mm:ss")
+//   netgsm_inbox($config, $start, $stop)           -> data   incoming messages ("ddMMyyyyHHmmss")
+//
+// A send/cancel result: ["ok" => bool, "code" => "00".., "jobid" => "..", "message" =>
+// human text, "status" => http int, "error" => net error or null, "raw" => body].
+// A data result (headers/report/inbox): same but ["data" => decoded JSON] instead of jobid.
+// A balance result: ["ok", "code", "credit" => "123.45", "message", "status", "error", "raw"].
+//
+// The API base is env NETGSM_API_BASE (default https://api.netgsm.com.tr), so you can
+// point it at a mock or staging gateway in tests.
+
+// ── config & shared helpers ───────────────────────────────────────────────────
+
+// netgsm_config($usercode, $password, $header) -> config assoc
+function netgsm_config($usercode, $password, $header) {
+    return [
+        "usercode" => $usercode,
+        "password" => $password,
+        "header"   => $header,
+        "base"     => env("NETGSM_API_BASE", "https://api.netgsm.com.tr")
+    ];
+}
+
+// HTTP Basic auth header from usercode:password (matches the official SDK).
+function netgsm__auth($config) {
+    return "Basic " . crypto::base64_encode($config["usercode"] . ":" . $config["password"]);
+}
+
+function netgsm__json_headers($config) {
+    return [
+        "Authorization" => netgsm__auth($config),
+        "Content-Type"  => "application/json",
+        "Accept"        => "application/json"
+    ];
+}
+
+// Map a Netgsm response code to a human message. 00/01/02 mean accepted.
+function netgsm__code_message($code) {
+    if ($code == "00" || $code == "01" || $code == "02") { return "accepted"; }
+    if ($code == "20")  { return "message too long or contains invalid characters"; }
+    if ($code == "30")  { return "invalid credentials or no API permission for this IP"; }
+    if ($code == "40")  { return "sender header (msgheader) is not defined/approved"; }
+    if ($code == "50")  { return "IYS-controlled account: recipient not permitted"; }
+    if ($code == "51")  { return "missing IYS brand information"; }
+    if ($code == "70")  { return "invalid or missing parameters"; }
+    if ($code == "80")  { return "sending limit exceeded"; }
+    if ($code == "85")  { return "too many duplicate sends for the same number"; }
+    if ($code == "100") { return "system error"; }
+    return "unknown response code: " . $code;
+}
+
+function netgsm__post($config, $path, $body_assoc) {
+    return http::post($config["base"] . $path, json::encode($body_assoc), netgsm__json_headers($config), ["timeout" => 30000]);
+}
+
+function netgsm__get($config, $path) {
+    $headers = ["Authorization" => netgsm__auth($config), "Accept" => "application/json"];
+    return http::get($config["base"] . $path, $headers, ["timeout" => 30000]);
+}
+
+// Normalize a coded response (send/cancel): surfaces code + jobid.
+function netgsm__result($res) {
+    if ($res["error"] != null) {
+        return ["ok" => false, "code" => "", "jobid" => "", "message" => "network error: " . $res["error"], "status" => 0, "error" => $res["error"], "raw" => ""];
+    }
+    $data = json::decode($res["body"]);
+    $code = "";
+    $jobid = "";
+    if ($data != null) {
+        if ($data["code"] != null)  { $code = "" . $data["code"]; }
+        if ($data["jobid"] != null) { $jobid = "" . $data["jobid"]; }
+    }
+    $ok = ($code == "00" || $code == "01" || $code == "02");
+    return ["ok" => $ok, "code" => $code, "jobid" => $jobid, "message" => netgsm__code_message($code), "status" => $res["status"], "error" => null, "raw" => $res["body"]];
+}
+
+// Normalize a data response (headers/report/inbox): hands back the decoded JSON as "data"
+// (its inner shape is Netgsm's, surfaced verbatim rather than reshaped here).
+function netgsm__data($res) {
+    if ($res["error"] != null) {
+        return ["ok" => false, "code" => "", "data" => null, "message" => "network error: " . $res["error"], "status" => 0, "error" => $res["error"], "raw" => ""];
+    }
+    $data = json::decode($res["body"]);
+    $code = "";
+    if ($data != null) {
+        if ($data["code"] != null) { $code = "" . $data["code"]; }
+    }
+    $ok = ($res["status"] == 200);
+    if ($code != "") { $ok = ($code == "00" || $code == "01" || $code == "02"); }
+    return ["ok" => $ok, "code" => $code, "data" => $data, "message" => netgsm__code_message($code), "status" => $res["status"], "error" => null, "raw" => $res["body"]];
+}
+
+// ── sending ───────────────────────────────────────────────────────────────────
+
+function netgsm__send_impl($config, $no_list, $message, $when) {
+    $messages = [];
+    foreach ($no_list as $no) {
+        $messages = array::push($messages, ["msg" => $message, "no" => "" . $no]);
+    }
+    $body = ["msgheader" => $config["header"], "encoding" => "TR", "messages" => $messages];
+    if ($when != null) { $body["startdate"] = $when; }
+    return netgsm__result(netgsm__post($config, "/sms/rest/v2/send", $body));
+}
+
+// netgsm_send_many($config, $no_list, $message) -> result  (many recipients, one call)
+function netgsm_send_many($config, $no_list, $message) {
+    return netgsm__send_impl($config, $no_list, $message, null);
+}
+
+// netgsm_send($config, $no, $message) -> result  (single recipient)
+function netgsm_send($config, $no, $message) {
+    return netgsm__send_impl($config, [$no], $message, null);
+}
+
+// netgsm_send_scheduled($config, $no_list, $message, $when) -> result
+// $when: send time as "ddMMyyyyHHmm" (e.g. "010120261830"). Cancel it later with the jobid.
+function netgsm_send_scheduled($config, $no_list, $message, $when) {
+    return netgsm__send_impl($config, $no_list, $message, $when);
+}
+
+// netgsm_cancel($config, $jobid) -> result  (cancel a scheduled batch by its jobid)
+function netgsm_cancel($config, $jobid) {
+    return netgsm__result(netgsm__post($config, "/sms/rest/v2/cancel", ["jobid" => "" . $jobid]));
+}
+
+// ── account & reports ─────────────────────────────────────────────────────────
+
+// netgsm_headers($config) -> data  (your approved sender names / msgheaders)
+function netgsm_headers($config) {
+    return netgsm__data(netgsm__get($config, "/sms/rest/v2/msgheader"));
+}
+
+// netgsm_report($config, $start, $stop) -> data  (delivery report)
+// $start/$stop: "dd.MM.yyyy HH:mm:ss". Pass the window your batch was sent in.
+function netgsm_report($config, $start, $stop) {
+    return netgsm__data(netgsm__post($config, "/sms/rest/v2/report", ["startdate" => $start, "stopdate" => $stop]));
+}
+
+// netgsm_inbox($config, $start, $stop) -> data  (incoming messages)
+// $start/$stop: "ddMMyyyyHHmmss".
+function netgsm_inbox($config, $start, $stop) {
+    return netgsm__data(netgsm__get($config, "/sms/rest/v2/inbox?startdate=" . $start . "&stopdate=" . $stop));
+}
+
+// netgsm_balance($config) -> ["ok","code","credit","message","status","error","raw"]
+// Remaining SMS credit via the classic balance endpoint, which answers plain text
+// "<code> <credit>" (e.g. "00 123.45") and takes the credentials as query parameters.
+function netgsm_balance($config) {
+    $url = $config["base"] . "/balance/list/get?usercode=" . $config["usercode"] . "&password=" . $config["password"];
+    $res = http::get($url, [], ["timeout" => 30000]);
+    if ($res["error"] != null) {
+        return ["ok" => false, "code" => "", "credit" => "", "message" => "network error: " . $res["error"], "status" => 0, "error" => $res["error"], "raw" => ""];
+    }
+    $raw = string::trim($res["body"]);
+    $parts = string::split($raw, " ");
+    $code = "";
+    $credit = "";
+    if (count($parts) > 0) { $code = $parts[0]; }
+    if (count($parts) > 1) { $credit = $parts[1]; }
+    $ok = ($code == "00");
+    $msg = netgsm__code_message($code);
+    if ($ok) { $msg = "ok"; }
+    return ["ok" => $ok, "code" => $code, "credit" => $credit, "message" => $msg, "status" => $res["status"], "error" => null, "raw" => $res["body"]];
+}

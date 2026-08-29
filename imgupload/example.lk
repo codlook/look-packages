@@ -1,0 +1,40 @@
+// example.lk — the LOOK side of the image-upload flow. Run under lk-fcgi:
+//   UPLOAD_DIR=/var/data/uploads lk-fcgi --mode http --port 8080 example.lk
+//
+// The browser (see example.html + optimize.js) converts the photo to a small WebP and
+// POSTs it here. LOOK stores it securely with core builtins — no image codec needed
+// server-side. request::file() does magic-byte + MIME + size checks; file::store() writes
+// outside the web root with a SHA-256 name.
+
+use file
+
+route("POST", "/upload", function() {
+    $f = request::file("image");
+    if ($f == null) {
+        response::status(400);
+        response::json(["ok" => false, "error" => "no file"]);
+        return;
+    }
+    // request::file() gives the DETECTED mime (magic-byte) + size — enforce your own allowlist.
+    if ($f["mime"] != "image/webp" && $f["mime"] != "image/jpeg") {
+        response::status(400);
+        response::json(["ok" => false, "error" => "only webp/jpeg allowed"]);
+        return;
+    }
+    if ($f["size"] > 5000000) {
+        response::status(400);
+        response::json(["ok" => false, "error" => "too large"]);
+        return;
+    }
+    $saved = file::store($f, "products");        // -> permanent storage, SHA-256 name
+    response::json(["ok" => true, "url" => $saved["url"]]);
+});
+
+// A tiny page that serves the uploader (in real apps, serve optimize.js as a static asset).
+route("GET", "/", function() {
+    response::html("<form id=f><input type=file id=img accept=image/*><button>Yükle</button></form>"
+        . "<script src=/optimize.js></script>"
+        . "<script>f.onsubmit=async e=>{e.preventDefault();"
+        . "await uploadOptimized(img.files[0], '/upload', {maxWidth:1600, quality:0.8});"
+        . "alert('yüklendi (WebP)');}</script>");
+});

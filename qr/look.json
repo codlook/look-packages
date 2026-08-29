@@ -1,0 +1,9 @@
+{
+  "description": "QR Code generator — pure LOOK, no native code and no external service. Byte-mode (any UTF-8 text or URL), automatic version, Reed-Solomon error correction and spec mask selection, rendered to a self-contained SVG. Verified module-for-module against Project Nayuki's reference generator across versions 1–11, all ECC levels and UTF-8.",
+  "tags": ["qr", "qrcode", "svg", "barcode"],
+  "icon": "🔳",
+  "color": "navy",
+  "use": "use \"pkg/qr\"",
+  "version": "1.0.0",
+  "author": "codlook"
+}

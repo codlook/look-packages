@@ -1,0 +1,56 @@
+// example.lk — the full netgsm flow: check credit, list your headers, send, report.
+//
+// Run it with your Netgsm credentials in the environment:
+//   NETGSM_USERCODE=12345 NETGSM_PASSWORD=secret NETGSM_HEADER=ACME lk example.lk
+//
+// To try it against a local mock instead of spending real SMS:
+//   NETGSM_API_BASE=http://127.0.0.1:8099 LOOK_ALLOW_SSRF=1 lk example.lk
+//
+// (The install form is `use "pkg/netgsm"`; this example uses the file path so it
+//  runs straight from the package directory.)
+
+use "pkg/netgsm/netgsm.lk"
+
+// Build the config once, from the environment — never hard-code credentials.
+$sms = netgsm_config(
+    env("NETGSM_USERCODE"),
+    env("NETGSM_PASSWORD"),
+    env("NETGSM_HEADER")
+)
+
+// 1) Remaining credit (kalan kontör) — check before a big campaign.
+$bal = netgsm_balance($sms)
+if ($bal["ok"]) {
+    print("credit: " . $bal["credit"])
+} else {
+    print("balance check failed: " . $bal["code"] . " (" . $bal["message"] . ")")
+}
+
+// 2) Your approved sender names (başlıklar) — $header must be one of these.
+$hdr = netgsm_headers($sms)
+if ($hdr["ok"]) {
+    print("approved headers: " . json::encode($hdr["data"]))
+}
+
+// 3) Send one SMS, and branch on the normalized result.
+$r = netgsm_send($sms, "5301112233", "Siparişiniz kargoya verildi. İyi günler!")
+if ($r["ok"]) {
+    print("sent — jobid=" . $r["jobid"])
+} else {
+    // code 40 = header not approved, code 30 = bad credentials, code 20 = bad message …
+    print("send failed — code=" . $r["code"] . " (" . $r["message"] . ")")
+}
+
+// 4) One message to many numbers, in a single call (a campaign blast).
+$b = netgsm_send_many($sms, ["5301112233", "5324445566", "5335556677"], "Kampanya başladı — %20 indirim!")
+print("bulk — ok=" . $b["ok"] . " jobid=" . $b["jobid"])
+
+// 5) Later, pull a delivery report for the window you sent in.
+//    $rep = netgsm_report($sms, "01.01.2026 00:00:00", "01.01.2026 23:59:59")
+//
+//    Schedule a future send and cancel it by jobid:
+//    $s = netgsm_send_scheduled($sms, ["5301112233"], "Hatırlatma", "010120261830")
+//    netgsm_cancel($sms, $s["jobid"])
+//
+//    Read incoming replies:
+//    $in = netgsm_inbox($sms, "01012026000000", "01012026235959")

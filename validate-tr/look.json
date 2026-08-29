@@ -1,0 +1,9 @@
+{
+  "description": "Turkish form validators — pure LOOK, no dependency and no service. TC Kimlik No (official checksum), IBAN (ISO 13616 mod-97), mobile number and licence plate — the checks every Turkish sign-up or order form needs. Deterministic and locally verifiable. Verified against a reference implementation across 267 cases.",
+  "tags": ["validation", "turkey", "tckn", "iban"],
+  "icon": "✅",
+  "color": "green",
+  "use": "use \"pkg/validate-tr\"",
+  "version": "1.0.0",
+  "author": "codlook"
+}

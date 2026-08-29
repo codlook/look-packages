@@ -1,0 +1,9 @@
+{
+  "description": "PNG/BMP image toolkit — pure LOOK, no native code and no external service. Decodes PNG (carries its own RFC-1951 inflate), resizes, crops, and re-encodes to PNG or exports to BMP. For small-to-medium images: logos, icons, thumbnails, QR/graphics. Not JPEG (a JPEG codec isn't practical in pure LOOK). Verified against Pillow.",
+  "tags": ["image", "png", "bmp", "resize"],
+  "icon": "🖼️",
+  "color": "navy",
+  "use": "use \"pkg/image\"",
+  "version": "1.0.0",
+  "author": "codlook"
+}

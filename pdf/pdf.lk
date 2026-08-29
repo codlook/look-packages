@@ -1,0 +1,410 @@
+use array;
+use string;
+use math;
+use crypto;
+
+// pdf — a PDF generator for LOOK, pure LOOK (no native code, no service). It builds
+// uncompressed, ASCII PDFs. Two layers:
+//
+// High-level document builder (multi-page flow: auto word-wrap, page breaks, alignment,
+// colors, tables — uses real Helvetica metrics for accurate layout):
+//   doc_new($opts)                          -> doc      $opts: width/height/margin
+//   doc_heading($d, $text)                  -> doc      big bold line
+//   doc_text($d, $text, $opts)              -> doc      $opts: size, bold(1), align, color, gap
+//   doc_table($d, $rows, $opts)             -> doc      $opts: header(1), cols[], aligns[]
+//   doc_hr($d) / doc_spacer($d, $h)         -> doc      rule / vertical space
+//   doc_draw($d, $ops, $h) / doc_page($d)   -> doc      raw ops at cursor / force page break
+//   doc_render($d)                          -> string   the finished multi-page PDF
+//
+// Low-level, for absolute placement / single page:
+//   pdf($text)                              -> string   one line of text on an A4 page (easy)
+//   pdf_render($content, $opts)             -> string   assemble one page from content ops
+//   pdf_render_pages($pages, $opts)         -> string   multi-page from an array of contents
+//
+// Content ops (concatenate them into the $content string):
+//   pdf_text($x, $y, $size, $text)          text (Helvetica)      pdf_bold(...)  bold
+//   pdf_line($x1, $y1, $x2, $y2)            a line
+//   pdf_rect($x, $y, $w, $h)                a stroked rectangle   pdf_fill($x,$y,$w,$h)  filled
+//   pdf_matrix($x, $y, $module, $grid)      a QR matrix (0/1 grid from qr_matrix), top at $y
+//   pdf_bars($x, $y, $unit, $height, $pat)  a barcode module string ("1"=bar) as vertical bars
+//
+// $opts for pdf_render (assoc, optional): "width"/"height" (points, default A4 595×842).
+//
+// Coordinates are PDF-native: origin bottom-left, y grows UP. A4 is 595×842 pt. Turkish text
+// (ğ ş ı İ ç ö ü …) is handled via a Differences encoding + octal escapes, so the file stays
+// pure ASCII — no font embedding, no binary output.
+
+// Turkish char -> WinAnsi/Differences byte code (see the Encoding object in pdf_render).
+function pdf__tr($ch) {
+    if ($ch == "ç") { return 231; } if ($ch == "ö") { return 246; } if ($ch == "ü") { return 252; }
+    if ($ch == "Ç") { return 199; } if ($ch == "Ö") { return 214; } if ($ch == "Ü") { return 220; }
+    if ($ch == "ğ") { return 240; } if ($ch == "Ğ") { return 208; }
+    if ($ch == "ş") { return 254; } if ($ch == "Ş") { return 222; }
+    if ($ch == "ı") { return 253; } if ($ch == "İ") { return 221; }
+    return 0 - 1;
+}
+function pdf__oct($b) {
+    return "\\" . math::floor($b / 64) . (math::floor($b / 8) % 8) . ($b % 8);
+}
+// escape a string for a PDF text object. Output is always pure ASCII so the whole file
+// stays ASCII (byte offsets = char counts): Turkish -> octal escape; ( ) \ escaped; other
+// ASCII kept; en/em dashes -> "-"; any remaining non-ASCII -> "?".
+function pdf__enc($text) {
+    $out = "";
+    $i = 0;
+    $n = string::len($text);
+    while ($i < $n) {
+        $ch = string::substr($text, $i, 1);
+        $tr = pdf__tr($ch);
+        if ($tr >= 0) { $out = $out . pdf__oct($tr); }
+        else {
+            if (string::len(crypto::hex_encode($ch)) > 2) {
+                // multi-byte, not a mapped Turkish letter
+                if ($ch == "—" || $ch == "–") { $out = $out . "-"; } else { $out = $out . "?"; }
+            } else {
+                if ($ch == "(") { $out = $out . "\\("; }
+                else { if ($ch == ")") { $out = $out . "\\)"; }
+                else { if ($ch == "\\") { $out = $out . "\\\\"; }
+                else { $out = $out . $ch; } } }
+            }
+        }
+        $i = $i + 1;
+    }
+    return $out;
+}
+
+// ── content ops ─────────────────────────────────────────────────────────────────
+function pdf_text($x, $y, $size, $text) {
+    return "BT /F1 " . $size . " Tf " . $x . " " . $y . " Td (" . pdf__enc($text) . ") Tj ET\n";
+}
+function pdf_bold($x, $y, $size, $text) {
+    return "BT /F2 " . $size . " Tf " . $x . " " . $y . " Td (" . pdf__enc($text) . ") Tj ET\n";
+}
+function pdf_line($x1, $y1, $x2, $y2) {
+    return $x1 . " " . $y1 . " m " . $x2 . " " . $y2 . " l S\n";
+}
+function pdf_rect($x, $y, $w, $h) {
+    return $x . " " . $y . " " . $w . " " . $h . " re S\n";
+}
+function pdf_fill($x, $y, $w, $h) {
+    return $x . " " . $y . " " . $w . " " . $h . " re f\n";
+}
+// draw a 0/1 grid (e.g. qr_matrix) as filled squares, top-left of the grid at ($x, $y)
+function pdf_matrix($x, $y, $module, $grid) {
+    $size = count($grid);
+    $path = "";
+    $r = 0;
+    while ($r < $size) {
+        $c = 0;
+        while ($c < count($grid[$r])) {
+            if ($grid[$r][$c] == 1) {
+                $px = $x + $c * $module;
+                $py = $y - ($r + 1) * $module;
+                $path = $path . $px . " " . $py . " " . $module . " " . $module . " re ";
+            }
+            $c = $c + 1;
+        }
+        $r = $r + 1;
+    }
+    return $path . "f\n";
+}
+// draw a barcode module string ("1"=bar, "0"=space) as vertical bars from ($x, $y) up
+function pdf_bars($x, $y, $unit, $height, $pat) {
+    $n = string::len($pat);
+    $path = "";
+    $i = 0;
+    while ($i < $n) {
+        if (string::substr($pat, $i, 1) == "1") {
+            $path = $path . ($x + $i * $unit) . " " . $y . " " . $unit . " " . $height . " re ";
+        }
+        $i = $i + 1;
+    }
+    return $path . "f\n";
+}
+
+// ── assemble ────────────────────────────────────────────────────────────────────
+function pdf__pad10($nn) {
+    return string::pad_left("" . $nn, 10, "0");
+}
+// pdf_render_pages($pages, $opts) -> PDF from an array of page content strings (multi-page)
+function pdf_render_pages($pages, $opts) {
+    $w = 595;
+    $h = 842;
+    if ($opts != null) {
+        if ($opts["width"] != null)  { $w = $opts["width"]; }
+        if ($opts["height"] != null) { $h = $opts["height"]; }
+    }
+    $diff = "[208/Gbreve 221/Idotaccent 222/Scedilla 240/gbreve 253/dotlessi 254/scedilla]";
+    $np = count($pages);
+    // fixed objects: 1 Catalog, 2 Pages, 3 F1, 4 F2, 5 Encoding; then per page: page obj + content obj
+    $objs = [];
+    $objs = array::push($objs, "<</Type/Catalog/Pages 2 0 R>>");
+    $kids = "";
+    $pi = 0;
+    while ($pi < $np) { $kids = $kids . (6 + 2 * $pi) . " 0 R "; $pi = $pi + 1; }
+    $objs = array::push($objs, "<</Type/Pages/Kids[" . $kids . "]/Count " . $np . ">>");
+    $objs = array::push($objs, "<</Type/Font/Subtype/Type1/BaseFont/Helvetica/Encoding 5 0 R>>");
+    $objs = array::push($objs, "<</Type/Font/Subtype/Type1/BaseFont/Helvetica-Bold/Encoding 5 0 R>>");
+    $objs = array::push($objs, "<</Type/Encoding/BaseEncoding/WinAnsiEncoding/Differences" . $diff . ">>");
+    $pi = 0;
+    while ($pi < $np) {
+        $objs = array::push($objs, "<</Type/Page/Parent 2 0 R/MediaBox[0 0 " . $w . " " . $h . "]/Resources<</Font<</F1 3 0 R/F2 4 0 R>>>>/Contents " . (7 + 2 * $pi) . " 0 R>>");
+        $cnt = $pages[$pi];
+        $objs = array::push($objs, "<</Length " . (string::len($cnt) + 1) . ">>\nstream\n" . $cnt . "\nendstream");
+        $pi = $pi + 1;
+    }
+    $pdf = "%PDF-1.4\n";
+    $offsets = [];
+    $i = 0;
+    while ($i < count($objs)) {
+        $offsets = array::push($offsets, string::len($pdf));
+        $pdf = $pdf . (($i + 1) . " 0 obj\n" . $objs[$i] . "\nendobj\n");
+        $i = $i + 1;
+    }
+    $xref = string::len($pdf);
+    $pdf = $pdf . "xref\n0 " . (count($objs) + 1) . "\n0000000000 65535 f \n";
+    $i = 0;
+    while ($i < count($offsets)) {
+        $pdf = $pdf . pdf__pad10($offsets[$i]) . " 00000 n \n";
+        $i = $i + 1;
+    }
+    $pdf = $pdf . "trailer\n<</Size " . (count($objs) + 1) . "/Root 1 0 R>>\nstartxref\n" . $xref . "\n%%EOF";
+    return $pdf;
+}
+// pdf_render($content, $opts) -> single-page PDF (kept for the low-level API)
+function pdf_render($content, $opts) {
+    return pdf_render_pages([$content], $opts);
+}
+
+// pdf($text) -> one line of text on an A4 page (the easy one-liner)
+function pdf($text) {
+    return pdf_render(pdf_text(50, 780, 24, $text), null);
+}
+
+// ── font metrics (Helvetica / Helvetica-Bold WinAnsi widths, 1/1000 em) ──────────
+function pdf__wH() {
+    return [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,278,278,355,556,556,889,667,191,333,333,389,584,278,333,278,278,556,556,556,556,556,556,556,556,556,556,278,278,584,584,584,556,1015,667,667,722,722,667,611,778,722,278,500,667,556,833,722,778,667,778,722,667,611,722,667,944,667,667,611,278,278,278,469,556,333,556,556,500,556,556,278,556,556,222,222,500,222,833,556,556,556,556,333,500,278,556,500,722,500,500,500,334,260,334,584,761,556,0,222,556,333,1000,556,556,333,1000,667,333,1000,0,611,0,0,222,222,333,333,350,556,1000,333,1000,500,333,944,0,500,667,278,333,556,556,556,556,260,556,333,737,370,556,584,333,737,333,400,584,333,333,333,556,537,278,333,333,365,556,834,834,834,611,667,667,667,667,667,667,1000,722,667,667,667,667,278,278,278,278,761,722,778,778,778,778,778,584,778,722,722,722,722,761,761,611,556,556,556,556,556,556,889,500,556,556,556,556,278,278,278,278,761,556,556,556,556,556,556,584,611,556,556,556,556,761,761,500];
+}
+function pdf__wHB() {
+    return [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,278,333,474,556,556,889,722,238,333,333,389,584,278,333,278,278,556,556,556,556,556,556,556,556,556,556,333,333,584,584,584,611,975,722,722,722,722,667,611,778,722,278,556,722,611,833,722,778,667,778,722,667,611,722,667,944,667,667,611,333,278,333,584,556,333,556,611,556,611,556,333,611,611,278,278,556,278,889,611,611,611,611,389,556,333,611,556,778,556,556,500,389,280,389,584,761,556,0,278,556,500,1000,556,556,333,1000,667,333,1000,0,611,0,0,278,278,500,500,350,556,1000,333,1000,556,333,944,0,500,667,278,333,556,556,556,556,280,556,333,737,370,556,584,333,737,333,400,584,333,333,333,611,556,278,333,333,365,556,834,834,834,611,722,722,722,722,722,722,1000,722,667,667,667,667,278,278,278,278,761,722,778,778,778,778,778,584,778,722,722,722,722,761,761,611,556,556,556,556,556,556,889,556,556,556,556,556,278,278,278,278,761,611,611,611,611,611,611,584,611,611,611,611,611,761,761,556];
+}
+function pdf__hexval2($ch) {
+    if ($ch == "0") { return 0; } if ($ch == "1") { return 1; } if ($ch == "2") { return 2; }
+    if ($ch == "3") { return 3; } if ($ch == "4") { return 4; } if ($ch == "5") { return 5; }
+    if ($ch == "6") { return 6; } if ($ch == "7") { return 7; } if ($ch == "8") { return 8; }
+    if ($ch == "9") { return 9; } if ($ch == "a") { return 10; } if ($ch == "b") { return 11; }
+    if ($ch == "c") { return 12; } if ($ch == "d") { return 13; } if ($ch == "e") { return 14; }
+    return 15;
+}
+function pdf__hx2($pair) {
+    return pdf__hexval2(string::substr($pair, 0, 1)) * 16 + pdf__hexval2(string::substr($pair, 1, 1));
+}
+// character -> WinAnsi/Differences code (for width lookup)
+function pdf__code($ch) {
+    $tr = pdf__tr($ch);
+    if ($tr >= 0) { return $tr; }
+    $hx = crypto::hex_encode($ch);
+    if (string::len($hx) == 2) { return pdf__hx2($hx); }
+    return 32;
+}
+// pdf_textwidth($text, $size, $bold) -> width in points
+function pdf_textwidth($text, $size, $bold) {
+    $wt = pdf__wH();
+    if ($bold == 1) { $wt = pdf__wHB(); }
+    $sum = 0;
+    $i = 0;
+    $n = string::len($text);
+    while ($i < $n) {
+        $sum = $sum + $wt[pdf__code(string::substr($text, $i, 1))];
+        $i = $i + 1;
+    }
+    return $sum * $size / 1000;
+}
+// greedy word wrap to a max width -> array of lines
+function pdf__wrap($text, $size, $bold, $maxw) {
+    $words = string::split($text, " ");
+    $lines = [];
+    $cur = "";
+    $i = 0;
+    while ($i < count($words)) {
+        $wd = $words[$i];
+        $try = $wd;
+        if ($cur != "") { $try = $cur . " " . $wd; }
+        if ($cur != "" && pdf_textwidth($try, $size, $bold) > $maxw) {
+            $lines = array::push($lines, $cur);
+            $cur = $wd;
+        } else {
+            $cur = $try;
+        }
+        $i = $i + 1;
+    }
+    if ($cur != "") { $lines = array::push($lines, $cur); }
+    return $lines;
+}
+// "#rrggbb" -> "r g b rg" (fill color op)
+function pdf__color($hex) {
+    $r = pdf__hx2(string::substr($hex, 1, 2)) / 255;
+    $g = pdf__hx2(string::substr($hex, 3, 2)) / 255;
+    $b = pdf__hx2(string::substr($hex, 5, 2)) / 255;
+    return $r . " " . $g . " " . $b . " rg";
+}
+
+// ── document builder (multi-page flow layout) ────────────────────────────────────
+// doc_new($opts) -> doc.  $opts: width/height (default A4), margin (default 50).
+function doc_new($opts) {
+    $d = ["w" => 595, "h" => 842, "mx" => 50, "my" => 50, "lead" => 1.35, "pages" => [], "cur" => "", "y" => 0];
+    if ($opts != null) {
+        if ($opts["width"] != null)  { $d["w"] = $opts["width"]; }
+        if ($opts["height"] != null) { $d["h"] = $opts["height"]; }
+        if ($opts["margin"] != null) { $d["mx"] = $opts["margin"]; $d["my"] = $opts["margin"]; }
+    }
+    $d["y"] = $d["h"] - $d["my"];
+    return $d;
+}
+function doc__break_if($d, $need) {
+    if ($d["y"] - $need < $d["my"]) {
+        $d["pages"] = array::push($d["pages"], $d["cur"]);
+        $d["cur"] = "";
+        $d["y"] = $d["h"] - $d["my"];
+    }
+    return $d;
+}
+// doc_text($d, $text, $opts) -> doc.  $opts: size, bold(1), align("left"/"center"/"right"),
+// color("#rrggbb"), gap (space after, default 4).
+function doc_text($d, $text, $opts) {
+    $size = 11;
+    $bold = 0;
+    $align = "left";
+    $color = null;
+    $gap = 4;
+    if ($opts != null) {
+        if ($opts["size"] != null)  { $size = $opts["size"]; }
+        if ($opts["bold"] != null)  { $bold = $opts["bold"]; }
+        if ($opts["align"] != null) { $align = $opts["align"]; }
+        if ($opts["color"] != null) { $color = $opts["color"]; }
+        if ($opts["gap"] != null)   { $gap = $opts["gap"]; }
+    }
+    $maxw = $d["w"] - 2 * $d["mx"];
+    $lines = pdf__wrap($text, $size, $bold, $maxw);
+    $lh = $size * $d["lead"];
+    $li = 0;
+    while ($li < count($lines)) {
+        $line = $lines[$li];
+        $d = doc__break_if($d, $lh);
+        $d["y"] = $d["y"] - $lh;
+        $x = $d["mx"];
+        if ($align == "right")  { $x = $d["w"] - $d["mx"] - pdf_textwidth($line, $size, $bold); }
+        if ($align == "center") { $x = ($d["w"] - pdf_textwidth($line, $size, $bold)) / 2; }
+        $op = "";
+        if ($color != null) { $op = pdf__color($color) . "\n"; }
+        if ($bold == 1) { $op = $op . pdf_bold($x, $d["y"], $size, $line); }
+        else { $op = $op . pdf_text($x, $d["y"], $size, $line); }
+        if ($color != null) { $op = $op . "0 0 0 rg\n"; }
+        $d["cur"] = $d["cur"] . $op;
+        $li = $li + 1;
+    }
+    $d["y"] = $d["y"] - $gap;
+    return $d;
+}
+// doc_heading($d, $text) -> doc  (big bold line)
+function doc_heading($d, $text) {
+    return doc_text($d, $text, ["size" => 17, "bold" => 1, "gap" => 8]);
+}
+// doc_spacer($d, $h) -> doc  (vertical space)
+function doc_spacer($d, $h) {
+    $d["y"] = $d["y"] - $h;
+    return $d;
+}
+// doc_hr($d) -> doc  (horizontal rule)
+function doc_hr($d) {
+    $d = doc__break_if($d, 8);
+    $d["y"] = $d["y"] - 4;
+    $d["cur"] = $d["cur"] . pdf_line($d["mx"], $d["y"], $d["w"] - $d["mx"], $d["y"]);
+    $d["y"] = $d["y"] - 4;
+    return $d;
+}
+// doc_draw($d, $ops, $h) -> doc  (drop raw content ops at the cursor; advance by $h)
+function doc_draw($d, $ops, $h) {
+    $d = doc__break_if($d, $h);
+    $d["cur"] = $d["cur"] . $ops;
+    $d["y"] = $d["y"] - $h;
+    return $d;
+}
+// doc_y($d) -> current cursor y (for absolute placement with the low-level ops)
+function doc_y($d) { return $d["y"]; }
+// doc_page($d) -> doc  (force a page break)
+function doc_page($d) {
+    $d["pages"] = array::push($d["pages"], $d["cur"]);
+    $d["cur"] = "";
+    $d["y"] = $d["h"] - $d["my"];
+    return $d;
+}
+// doc_render($d) -> the full multi-page PDF string
+function doc_render($d) {
+    $pages = array::push($d["pages"], $d["cur"]);
+    return pdf_render_pages($pages, ["width" => $d["w"], "height" => $d["h"]]);
+}
+
+// doc_table($d, $rows, $opts) -> doc. $rows: array of rows, each an array of cell strings.
+// $opts: cols (array of column widths in pt; default equal), header (1 = bold first row),
+// aligns (array of "left"/"right"/"center" per column), size (default 10).
+function doc_table($d, $rows, $opts) {
+    $size = 10;
+    $header = 0;
+    $cols = null;
+    $aligns = null;
+    $pad = 5;
+    if ($opts != null) {
+        if ($opts["size"] != null)   { $size = $opts["size"]; }
+        if ($opts["header"] != null) { $header = $opts["header"]; }
+        if ($opts["cols"] != null)   { $cols = $opts["cols"]; }
+        if ($opts["aligns"] != null) { $aligns = $opts["aligns"]; }
+    }
+    $nrows = count($rows);
+    if ($nrows == 0) { return $d; }
+    $ncols = count($rows[0]);
+    $contentw = $d["w"] - 2 * $d["mx"];
+    if ($cols == null) {
+        $cols = [];
+        $eq = $contentw / $ncols;
+        $k = 0;
+        while ($k < $ncols) { $cols = array::push($cols, $eq); $k = $k + 1; }
+    }
+    $tw = 0;
+    $k = 0;
+    while ($k < $ncols) { $tw = $tw + $cols[$k]; $k = $k + 1; }
+    $rowh = $size * 1.8;
+    $ri = 0;
+    while ($ri < $nrows) {
+        $row = $rows[$ri];
+        $d = doc__break_if($d, $rowh);
+        $ytop = $d["y"];
+        $d["y"] = $d["y"] - $rowh;
+        $ybot = $d["y"];
+        $bold = 0;
+        if ($header == 1 && $ri == 0) { $bold = 1; }
+        $g = pdf_line($d["mx"], $ytop, $d["mx"] + $tw, $ytop);
+        $g = $g . pdf_line($d["mx"], $ybot, $d["mx"] + $tw, $ybot);
+        $cx = $d["mx"];
+        $ci = 0;
+        while ($ci < $ncols) {
+            $g = $g . pdf_line($cx, $ybot, $cx, $ytop);
+            $cell = $row[$ci];
+            $cw = $cols[$ci];
+            $al = "left";
+            if ($aligns != null) { if ($aligns[$ci] != null) { $al = $aligns[$ci]; } }
+            $tx = $cx + $pad;
+            if ($al == "right")  { $tx = $cx + $cw - $pad - pdf_textwidth($cell, $size, $bold); }
+            if ($al == "center") { $tx = $cx + ($cw - pdf_textwidth($cell, $size, $bold)) / 2; }
+            if ($bold == 1) { $g = $g . pdf_bold($tx, $ybot + $pad, $size, $cell); }
+            else { $g = $g . pdf_text($tx, $ybot + $pad, $size, $cell); }
+            $cx = $cx + $cw;
+            $ci = $ci + 1;
+        }
+        $g = $g . pdf_line($cx, $ybot, $cx, $ytop);
+        $d["cur"] = $d["cur"] . $g;
+        $ri = $ri + 1;
+    }
+    $d["y"] = $d["y"] - 6;
+    return $d;
+}

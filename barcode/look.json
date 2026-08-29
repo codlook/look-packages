@@ -1,9 +1,9 @@
 {
-  "description": "Code 128 barcode generator — pure LOOK, no native code and no external service. Encodes printable-ASCII (SKUs, order ids, short URLs) with automatic code-set switching that packs digit runs two-to-a-symbol, rendered to a self-contained SVG. Verified module-for-module against python-barcode.",
-  "tags": ["barcode", "code128", "svg", "sku"],
+  "description": "Code 128 and EAN-13 barcode generators — pure LOOK, no native code and no external service. Code 128 encodes printable-ASCII (SKUs, order ids, short URLs) with automatic code-set switching; EAN-13 renders the 13-digit retail product code (GTIN-13) with its mod-10 check digit and the classic human-readable number. Self-contained SVG, verified module-for-module against python-barcode.",
+  "tags": ["barcode", "code128", "ean13", "svg", "sku", "retail"],
   "icon": "🏷️",
   "color": "navy",
   "use": "use \"pkg/barcode\"",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": "codlook"
 }

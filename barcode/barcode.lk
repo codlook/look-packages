@@ -168,3 +168,170 @@ function barcode_svg($text, $opts) {
 function barcode($text) {
     return barcode_svg($text, null);
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// EAN-13 — the 13-digit retail product barcode (GTIN-13). Encodes exactly 12 or
+// 13 digits: the first digit is carried by the parity pattern of the left group,
+// the last digit is a mod-10 checksum (recomputed here, so pass 12 digits and it
+// appends the check, or pass 13 and the check is corrected to match).
+//
+//   ean13($digits)             -> string   SVG with human-readable number (one-liner)
+//   ean13_svg($digits, $opts)  -> string   SVG with sizing / color control
+//   ean13_pattern($digits)     -> string   the raw 95-module string ("1"=bar,"0"=space)
+//   ean13_checkdigit($digits)  -> int      the mod-10 check digit for the first 12 digits
+//   ean13_normalize($digits)   -> string   the full 13-digit code (with correct check), "" if invalid
+// ═══════════════════════════════════════════════════════════════════════════
+
+function ean13__d($ch) {
+    if ($ch >= "0" && $ch <= "9") { return string::index_of("0123456789", $ch); }
+    return 0 - 1;
+}
+
+// keep only the digit characters of the input
+function ean13__digits($text) {
+    $s = "" . $text;
+    $out = "";
+    $i = 0;
+    while ($i < string::len($s)) {
+        $ch = string::substr($s, $i, 1);
+        if ($ch >= "0" && $ch <= "9") { $out = $out . $ch; }
+        $i = $i + 1;
+    }
+    return $out;
+}
+
+// L-codes (left, odd parity), G-codes (left, even parity), R-codes (right), by digit 0–9
+function ean13__L() {
+    return ["0001101","0011001","0010011","0111101","0100011","0110001","0101111","0111011","0110111","0001011"];
+}
+function ean13__G() {
+    return ["0100111","0110011","0011011","0100001","0011101","0111001","0000101","0010001","0001001","0010111"];
+}
+function ean13__R() {
+    return ["1110010","1100110","1101100","1000010","1011100","1001110","1010000","1000100","1001000","1110100"];
+}
+// parity pattern of the six left digits, selected by the first digit ("L"/"G")
+function ean13__parity() {
+    return ["LLLLLL","LLGLGG","LLGGLG","LLGGGL","LGLLGG","LGGLLG","LGGGLL","LGLGLG","LGLGGL","LGGLGL"];
+}
+
+// mod-10 checksum of the first twelve digits (odd positions ×1, even ×3, from the left)
+function ean13_checkdigit($digits) {
+    $s = ean13__digits($digits);
+    $sum = 0;
+    $i = 0;
+    while ($i < 12) {
+        $v = ean13__d(string::substr($s, $i, 1));
+        if (($i % 2) == 0) { $sum = $sum + $v; } else { $sum = $sum + $v * 3; }
+        $i = $i + 1;
+    }
+    return (10 - ($sum % 10)) % 10;
+}
+
+// -> full 13-digit code with a correct check digit, or "" if there aren't 12/13 digits
+function ean13_normalize($digits) {
+    $s = ean13__digits($digits);
+    $n = string::len($s);
+    if ($n != 12 && $n != 13) { return ""; }
+    $first12 = string::substr($s, 0, 12);
+    return $first12 . ("" . ean13_checkdigit($first12));
+}
+
+// -> the raw 95-module string: start(101) L/G×6 center(01010) R×6 end(101)
+function ean13_pattern($digits) {
+    $code = ean13_normalize($digits);
+    if ($code == "") { return ""; }
+    $L = ean13__L();
+    $G = ean13__G();
+    $R = ean13__R();
+    $par = ean13__parity()[ean13__d(string::substr($code, 0, 1))];
+    $out = "101";                                   // start guard
+    $i = 1;
+    while ($i < 7) {                                // left group: digits 2–7
+        $d = ean13__d(string::substr($code, $i, 1));
+        if (string::substr($par, $i - 1, 1) == "L") { $out = $out . $L[$d]; }
+        else { $out = $out . $G[$d]; }
+        $i = $i + 1;
+    }
+    $out = $out . "01010";                          // center guard
+    while ($i < 13) {                               // right group: digits 8–13
+        $out = $out . $R[ean13__d(string::substr($code, $i, 1))];
+        $i = $i + 1;
+    }
+    return $out . "101";                            // end guard
+}
+
+// which of the 95 modules belong to a guard bar (drawn full height, past the digits)
+function ean13__is_guard($i) {
+    if ($i < 3) { return 1; }                       // start
+    if ($i >= 45 && $i < 50) { return 1; }          // center
+    if ($i >= 92) { return 1; }                     // end
+    return 0;
+}
+
+// ean13_svg($digits, $opts) -> classic EAN-13 SVG (guard bars extended, number below)
+function ean13_svg($digits, $opts) {
+    $scale = 2;
+    $height = 70;
+    $quiet = 11;                                    // left quiet zone (modules)
+    $dark = "#000";
+    $light = "#fff";
+    $width = 0 - 1;
+    $text = 1;                                      // draw the human-readable number
+    if ($opts != null) {
+        if ($opts["scale"] != null)  { $scale = $opts["scale"]; }
+        if ($opts["height"] != null) { $height = $opts["height"]; }
+        if ($opts["quiet"] != null)  { $quiet = $opts["quiet"]; }
+        if ($opts["dark"] != null)   { $dark = $opts["dark"]; }
+        if ($opts["light"] != null)  { $light = $opts["light"]; }
+        if ($opts["width"] != null)  { $width = $opts["width"]; }
+        if ($opts["text"] != null)   { $text = $opts["text"]; }
+    }
+    $code = ean13_normalize($digits);
+    if ($code == "") { return ""; }
+    $pat = ean13_pattern($digits);
+    $n = string::len($pat);                         // 95
+    $rquiet = 7;
+    $vbw = ($n + $quiet + $rquiet) * $scale;
+    $w = $vbw;
+    if ($width > 0) { $w = $width; }
+    $textzone = 0;
+    if ($text != 0) { $textzone = 11; }
+    $bh = $height - $textzone;                      // data-bar height
+    $gh = $bh + 5;                                   // guard bars reach into the text row
+    if ($gh > $height) { $gh = $height; }
+    $svg = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"" . $w . "\" height=\"" . $height . "\" viewBox=\"0 0 " . $vbw . " " . $height . "\" shape-rendering=\"crispEdges\">";
+    $svg = $svg . "<rect width=\"" . $vbw . "\" height=\"" . $height . "\" fill=\"" . $light . "\"/>";
+    $svg = $svg . "<path fill=\"" . $dark . "\" d=\"";
+    $i = 0;
+    while ($i < $n) {
+        if (string::substr($pat, $i, 1) == "1") {
+            $x = ($quiet + $i) * $scale;
+            $barh = $bh;
+            if (ean13__is_guard($i) != 0) { $barh = $gh; }
+            $svg = $svg . "M" . $x . " 0h" . $scale . "v" . $barh . "h-" . $scale . "z";
+        }
+        $i = $i + 1;
+    }
+    $svg = $svg . "\"/>";
+    if ($text != 0) {
+        $fs = 9;
+        $ty = $height - 1;
+        $fam = "font-family=\"monospace\" font-size=\"" . $fs . "\" fill=\"" . $dark . "\"";
+        // first digit sits in the left quiet zone
+        $x0 = ($quiet - 8) * $scale;
+        if ($x0 < 0) { $x0 = 0; }
+        $svg = $svg . "<text x=\"" . $x0 . "\" y=\"" . $ty . "\" " . $fam . ">" . string::substr($code, 0, 1) . "</text>";
+        // left six under the left group (start guard = 3 modules), right six under the right group
+        $lx = ($quiet + 3 + 21) * $scale;           // centre of the 42-module left group
+        $rx = ($quiet + 50 + 21) * $scale;
+        $svg = $svg . "<text x=\"" . $lx . "\" y=\"" . $ty . "\" text-anchor=\"middle\" letter-spacing=\"" . ($scale + 1) . "\" " . $fam . ">" . string::substr($code, 1, 6) . "</text>";
+        $svg = $svg . "<text x=\"" . $rx . "\" y=\"" . $ty . "\" text-anchor=\"middle\" letter-spacing=\"" . ($scale + 1) . "\" " . $fam . ">" . string::substr($code, 7, 6) . "</text>";
+    }
+    return $svg . "</svg>";
+}
+
+// ean13($digits) -> SVG with sensible defaults (the easy one-liner)
+function ean13($digits) {
+    return ean13_svg($digits, null);
+}

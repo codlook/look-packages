@@ -14,13 +14,23 @@ file::put("sku-sized.svg", barcode_svg("8691234567890", [
 
 print("wrote sku.svg and sku-sized.svg — open or scan them");
 
-// 3. Grab the SVG as a plain string — assign it, print it, return it from a route.
+// 3. EAN-13 retail product code. Pass 12 digits; the check digit is appended for you.
+print("full code : " . ean13_normalize("400638133393"));   // 4006381333931
+print("check     : " . ean13_checkdigit("400638133393"));  // 1
+file::put("product.svg", ean13("400638133393"));           // number rendered below the bars
+file::put("product-big.svg", ean13_svg("869012345678", ["scale" => 3, "height" => 100]));
+
+// 4. Grab the SVG as a plain string — assign it, print it, return it from a route.
 $ornekBarkod = barcode("ORDER-42");
 print($ornekBarkod);
 
-// 4. Serve it live from a route (uncomment inside an lk-fcgi app):
+// 5. Serve either kind live from a route (uncomment inside an lk-fcgi app):
 //
 //   route("GET", "/barcode/{sku}", function() {
 //       response::header("Content-Type", "image/svg+xml")
 //       response::text(barcode(request::param("sku")))
+//   })
+//   route("GET", "/ean/{code}", function() {
+//       response::header("Content-Type", "image/svg+xml")
+//       response::text(ean13(request::param("code")))
 //   })

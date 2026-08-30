@@ -45,6 +45,7 @@ $sell  = $rates["EUR"]["selling"]
 | `tcmb_convert($amount, $from, $to)` | `float` | `$amount` converted `$from` → `$to` through TRY (`-1` on error). |
 | `tcmb_rates()` | `assoc` \| `null` | Every currency keyed by ISO code (see record below), or `null` on failure. |
 | `tcmb_date()` | `string` | Bulletin date `"DD.MM.YYYY"`, or `""`. |
+| `tcmb_refresh()` | `true` | Drop the cached bulletin so the next call re-fetches (see caching below). |
 
 Each `tcmb_rates()` record:
 
@@ -60,10 +61,13 @@ Each `tcmb_rates()` record:
 
 ## Notes
 
-- The bulletin is published **once per weekday**. On weekends and holidays TCMB serves the last
-  working day's rates — `tcmb_date()` tells you which day you actually got.
-- Every top-level call fetches the bulletin. For several lookups, call `tcmb_rates()` **once** and
-  index the result rather than calling `tcmb_rate` repeatedly.
+- The bulletin is published **once per weekday** (~15:30). On weekends and holidays TCMB serves
+  the last working day's rates — `tcmb_date()` tells you which day you actually got.
+- **Caching is built in.** The download is cached for one hour (via the core `cache::`), so
+  repeated `tcmb_rate` / `tcmb_convert` calls — and, under `lk-fcgi`, every request — share a
+  single fetch instead of hitting TCMB each time. Call `tcmb_refresh()` to force a re-fetch (e.g.
+  just after 15:30). For many lookups in one go you can still call `tcmb_rates()` **once** and
+  index the result, saving even the repeated parse.
 - These are the central bank's reference rates, not a trading venue's live quote — right for
   invoices, price lists and accounting, not for executing FX trades.
 - Pure LOOK: it uses only the core `http::`, `string::` (regex), `array::` and `type::` builtins.

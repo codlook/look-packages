@@ -2,6 +2,7 @@ use string;
 use array;
 use type;
 use http;
+use cache;
 
 // tcmb — Turkish Central Bank (TCMB) daily foreign-exchange rates, pure LOOK.
 // Reads the bank's public, keyless bulletin (today.xml) over HTTPS and parses its
@@ -20,14 +21,31 @@ use http;
 // The bulletin is published once per weekday; on weekends/holidays TCMB serves the
 // last working day's rates. Codes are ISO 4217 (USD, EUR, GBP, …); "TRY"/"TL" = 1.
 
+// The bulletin changes at most once per weekday (~15:30), so the fetch is cached
+// for an hour: repeated tcmb_rate/tcmb_convert calls — and, under lk-fcgi, every
+// request — share one download instead of hammering TCMB. tcmb_refresh() clears it.
+function tcmb__key() { return "tcmb:today.xml"; }
+function tcmb__ttl() { return 3600; }
+
 function tcmb__fetch() {
+    $cached = cache::get(tcmb__key());
+    if ($cached != null) { return $cached; }
     $res = http::get("https://www.tcmb.gov.tr/kurlar/today.xml",
                      ["User-Agent" => "LOOK-tcmb/1.0"],
                      ["timeout" => 10000]);
     if ($res == null) { return null; }
     if ($res["error"] != null) { return null; }
     if ($res["status"] != 200) { return null; }
-    return $res["body"];
+    $body = $res["body"];
+    cache::set(tcmb__key(), $body, tcmb__ttl());
+    return $body;
+}
+
+// tcmb_refresh() -> drop the cached bulletin so the next call re-fetches (e.g. just
+// after 15:30, or to force fresh data). Returns true.
+function tcmb_refresh() {
+    cache::delete(tcmb__key());
+    return true;
 }
 
 function tcmb__f($s) {

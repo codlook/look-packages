@@ -38,6 +38,17 @@ if ($key == null || $key == "") {          // env() returns null when unset, not
 An example that only *looks* right but doesn't parse is worse than none — run it before you
 commit.
 
+## Updating a package — copy only what changed
+
+When you update an existing package in this repo, copy **only the files you changed** into your
+clone. Never replace a whole package directory from an incomplete local copy: if your copy is
+missing `look.json` (or the README), a wholesale replace silently **deletes** it — and since the
+package directory reads `look.json` live, the package would vanish from the site too.
+
+Before every commit, read `git status`. A deletion (`D`) you did not intend is the warning sign —
+it once caught three `look.json` files about to be dropped. Expect only the `A`/`M` lines for the
+files you meant to touch.
+
 ## Verify against something independent
 
 Where a package's output can be checked against an authoritative reference, check it — don't

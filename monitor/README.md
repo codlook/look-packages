@@ -42,6 +42,10 @@ look_requests_total 1420
 look_db_pool_busy 3
 ```
 
+**Note:** despite the name, `monitor_json()` returns the metrics **as an assoc**, not a JSON
+string — it is built to be handed to `response::json(monitor_json())` in a route. To print or log
+it as text, encode it yourself: `json::encode(monitor_json())`.
+
 | Metric | Type | Meaning |
 |--------|------|---------|
 | `look_requests_total` | counter | HTTP requests handled |

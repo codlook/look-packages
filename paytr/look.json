@@ -1,0 +1,9 @@
+{
+  "description": "PayTR iFrame (hosted checkout) integration — pure LOOK, no SDK. Builds the get-token request and its HMAC-SHA256 token exactly as PayTR's own Postman collection does, gives you the hosted-payment iframe URL, and verifies the server-to-server payment notification (timing-safe). Token, callback hash and URL-encoding are verified bit-exact against an independent HMAC oracle; not yet exercised against a live PayTR merchant account.",
+  "tags": ["paytr", "payment", "checkout", "turkey", "iframe"],
+  "icon": "💳",
+  "color": "navy",
+  "use": "use \"pkg/paytr\"",
+  "version": "1.0.0",
+  "author": "codlook"
+}

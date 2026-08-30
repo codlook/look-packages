@@ -1,0 +1,54 @@
+// example.lk — using the paytr package.  Run it:  lk example.lk
+//
+// PayTR iFrame flow: (1) your server asks PayTR for a token, (2) you show the
+// hosted payment iframe, (3) PayTR POSTs the result to your callback — you verify
+// its hash and answer "OK". PayTR's page handles the card; your app never sees it.
+
+use "pkg/paytr/paytr.lk"
+
+// Your PayTR credentials — keep these on the server, never in client code.
+$cfg = [
+    "merchant_id"   => "XXXXXX",
+    "merchant_key"  => "YYYYYYYYYYYYYYYY",
+    "merchant_salt" => "ZZZZZZZZZZZZZZZZ"
+]
+
+// 1. Ask PayTR for a token (do this in your checkout route).
+$res = paytr_token($cfg, [
+    "merchant_oid"     => "ORD" . "10001",          // your unique order id (letters+digits)
+    "email"            => "musteri@example.com",
+    "payment_amount"   => 1000,                     // amount in kuruş → 10.00 TL
+    "user_ip"          => request::ip(),            // in a route; here use the real client IP
+    "user_name"        => "Ada Yılmaz",
+    "user_address"     => "Kadıköy, İstanbul",
+    "user_phone"       => "5551234567",
+    "basket"           => [["Kahve", "10.00", 1]],  // [name, unit price, qty]
+    "merchant_ok_url"  => "https://siteniz.com/odeme-basarili",
+    "merchant_fail_url"=> "https://siteniz.com/odeme-hata",
+    "test_mode"        => 1                          // 1 while integrating, 0 in production
+])
+
+if ($res["ok"]) {
+    print("iframe URL: " . $res["url"])             // embed this URL in an <iframe>
+} else {
+    print("PayTR reddetti: " . $res["reason"])
+}
+
+// 2. Render the iframe (inside an lk-fcgi route):
+//   response::html("<script src=\"https://www.paytr.com/js/iframeResizer.min.js\"></script>"
+//     . "<iframe src=\"" . $res["url"] . "\" id=\"paytriframe\" frameborder=\"0\" "
+//     . "scrolling=\"no\" style=\"width:100%\"></iframe>"
+//     . "<script>iFrameResize({}, '#paytriframe');</script>")
+
+// 3. Callback route — PayTR POSTs the result here. Verify, then answer exactly "OK".
+//   route("POST", "/paytr/callback", function() use ($cfg) {
+//       $post = [
+//           "merchant_oid" => request::post("merchant_oid"),
+//           "status"       => request::post("status"),
+//           "total_amount" => request::post("total_amount"),
+//           "hash"         => request::post("hash")
+//       ]
+//       if (!paytr_verify_callback($cfg, $post)) { response::text("PAYTR bad hash"); return }
+//       if ($post["status"] == "success") { /* mark the order paid — idempotently */ }
+//       response::text("OK")           // PayTR retries until it sees "OK"
+//   })

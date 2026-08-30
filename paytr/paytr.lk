@@ -1,0 +1,166 @@
+use string;
+use array;
+use type;
+use crypto;
+use json;
+use http;
+
+// paytr — PayTR iFrame (hosted checkout) integration for LOOK, pure LOOK.
+// Builds the get-token request and its HMAC-SHA256 token exactly as PayTR's own
+// Postman collection / reference gateways do, opens the hosted payment iframe, and
+// verifies the server-to-server payment notification. No dependency, no SDK.
+//
+//   paytr_basket($items)              -> base64 JSON basket  ($items = [[name, price, qty], …])
+//   paytr_token($cfg, $order)         -> {ok, token, url, reason}   (calls get-token API)
+//   paytr_iframe_url($token)          -> the hosted-payment URL for that token
+//   paytr_verify_callback($cfg, $post)-> 1/0   (timing-safe check of the notification hash)
+//
+// $cfg (assoc): merchant_id, merchant_key, merchant_salt   (your PayTR credentials).
+//
+// SECURITY: credentials live only in $cfg you pass; the token/notification hashes use
+// merchant_key as the HMAC key and never leave your server. This package constructs
+// and verifies the requests — it never moves money; PayTR's hosted page does that.
+
+// ── percent-encode one value for an x-www-form-urlencoded body ────────────────
+// Byte-safe: multi-byte (UTF-8) chars are hex-encoded per byte, so Turkish names
+// and the base64 token (+ / =) are escaped correctly. No index_of/substr mixing.
+function paytr__unreserved($ch) {
+    $hx = crypto::hex_encode($ch);
+    if (string::len($hx) != 2) { return 0; }               // multi-byte → encode
+    if ($ch >= "0" && $ch <= "9") { return 1; }
+    if ($ch >= "A" && $ch <= "Z") { return 1; }
+    if ($ch >= "a" && $ch <= "z") { return 1; }
+    if ($ch == "-" || $ch == "." || $ch == "_" || $ch == "~") { return 1; }
+    return 0;
+}
+function paytr__enc($v) {
+    $s = "" . $v;
+    $out = "";
+    $i = 0;
+    $n = string::len($s);
+    while ($i < $n) {
+        $ch = string::substr($s, $i, 1);
+        if (paytr__unreserved($ch)) {
+            $out = $out . $ch;
+        } else {
+            $hx = string::upper(crypto::hex_encode($ch));
+            $j = 0;
+            while ($j < string::len($hx)) { $out = $out . "%" . string::substr($hx, $j, 2); $j = $j + 2; }
+        }
+        $i = $i + 1;
+    }
+    return $out;
+}
+
+// read an optional order field with a default
+function paytr__opt($order, $key, $def) {
+    if ($order == null) { return $def; }
+    $v = $order[$key];
+    if ($v == null) { return $def; }
+    return $v;
+}
+
+// base64( HMAC-SHA256($data, $key) ) — the one signing primitive both PayTR hashes use
+function paytr__sign($data, $key) {
+    return crypto::base64_encode(crypto::hmac_sha256_raw($data, $key));
+}
+
+// the get-token hash string, in PayTR's authoritative field order (Postman collection)
+function paytr__thash($mid, $ip, $oid, $email, $amount, $basket, $no, $max, $cur, $test) {
+    return $mid . $ip . $oid . $email . $amount . $basket . $no . $max . $cur . $test;
+}
+
+// paytr_basket($items) -> base64( JSON [[name, price, qty], …] )
+function paytr_basket($items) {
+    return crypto::base64_encode(json::encode($items));
+}
+
+// paytr_iframe_url($token) -> hosted-payment URL
+function paytr_iframe_url($token) {
+    return "https://www.paytr.com/odeme/guvenli/" . $token;
+}
+
+// paytr_token($cfg, $order) -> {ok, token, url, reason}
+// $order: merchant_oid, email, payment_amount (int, kuruş), user_ip, user_name,
+//         user_address, user_phone, basket ([[name,price,qty],…]) or user_basket,
+//         merchant_ok_url, merchant_fail_url; optional currency("TL"), no_installment(0),
+//         max_installment(0), test_mode(0), lang("tr"), timeout_limit(30), debug_on(0).
+function paytr_token($cfg, $order) {
+    $mid  = "" . $cfg["merchant_id"];
+    $key  = "" . $cfg["merchant_key"];
+    $salt = "" . $cfg["merchant_salt"];
+
+    $oid    = "" . $order["merchant_oid"];
+    $email  = "" . $order["email"];
+    $amount = "" . $order["payment_amount"];
+    $ip     = "" . $order["user_ip"];
+
+    $basket = paytr__opt($order, "user_basket", "");
+    if ($basket == "") { $basket = paytr_basket(paytr__opt($order, "basket", [])); }
+
+    $currency = "" . paytr__opt($order, "currency", "TL");
+    $no_inst  = "" . paytr__opt($order, "no_installment", 0);
+    $max_inst = "" . paytr__opt($order, "max_installment", 0);
+    $test     = "" . paytr__opt($order, "test_mode", 0);
+
+    // token hash string — order is authoritative (PayTR Postman get-iframe-token)
+    $hashstr = paytr__thash($mid, $ip, $oid, $email, $amount, $basket, $no_inst, $max_inst, $currency, $test);
+    $token = paytr__sign($hashstr . $salt, $key);
+
+    // x-www-form-urlencoded body
+    $body = "merchant_id=" . paytr__enc($mid)
+          . "&user_ip=" . paytr__enc($ip)
+          . "&merchant_oid=" . paytr__enc($oid)
+          . "&email=" . paytr__enc($email)
+          . "&payment_amount=" . paytr__enc($amount)
+          . "&paytr_token=" . paytr__enc($token)
+          . "&user_basket=" . paytr__enc($basket)
+          . "&debug_on=" . paytr__enc("" . paytr__opt($order, "debug_on", 0))
+          . "&no_installment=" . paytr__enc($no_inst)
+          . "&max_installment=" . paytr__enc($max_inst)
+          . "&user_name=" . paytr__enc(paytr__opt($order, "user_name", ""))
+          . "&user_address=" . paytr__enc(paytr__opt($order, "user_address", ""))
+          . "&user_phone=" . paytr__enc(paytr__opt($order, "user_phone", ""))
+          . "&merchant_ok_url=" . paytr__enc(paytr__opt($order, "merchant_ok_url", ""))
+          . "&merchant_fail_url=" . paytr__enc(paytr__opt($order, "merchant_fail_url", ""))
+          . "&timeout_limit=" . paytr__enc("" . paytr__opt($order, "timeout_limit", 30))
+          . "&currency=" . paytr__enc($currency)
+          . "&test_mode=" . paytr__enc($test)
+          . "&lang=" . paytr__enc(paytr__opt($order, "lang", "tr"));
+
+    $res = http::post("https://www.paytr.com/odeme/api/get-token", $body,
+                      ["Content-Type" => "application/x-www-form-urlencoded"],
+                      ["timeout" => 20000]);
+
+    $out = array::new_assoc();
+    if ($res == null || $res["error"] != null || $res["status"] != 200) {
+        $out["ok"] = 0; $out["token"] = ""; $out["url"] = "";
+        $out["reason"] = "HTTP error";
+        return $out;
+    }
+    $j = json::decode($res["body"]);
+    if ($j != null && $j["status"] == "success") {
+        $out["ok"] = 1;
+        $out["token"] = $j["token"];
+        $out["url"] = paytr_iframe_url($j["token"]);
+        $out["reason"] = "";
+    } else {
+        $out["ok"] = 0; $out["token"] = ""; $out["url"] = "";
+        $out["reason"] = "";
+        if ($j != null && $j["reason"] != null) { $out["reason"] = $j["reason"]; }
+    }
+    return $out;
+}
+
+// paytr_verify_callback($cfg, $post) -> 1/0
+// $post: the notification fields PayTR POSTs to your callback (merchant_oid, status,
+// total_amount, hash). Verifies the HMAC-SHA256 hash the same way PayTR builds it.
+// On a verified success, answer the request body with "OK" so PayTR stops retrying.
+function paytr_verify_callback($cfg, $post) {
+    $key  = "" . $cfg["merchant_key"];
+    $salt = "" . $cfg["merchant_salt"];
+    $hashstr = ("" . $post["merchant_oid"]) . $salt . ("" . $post["status"]) . ("" . $post["total_amount"]);
+    $expected = paytr__sign($hashstr, $key);
+    if (crypto::constant_compare("" . $post["hash"], $expected)) { return 1; }
+    return 0;
+}

@@ -6,8 +6,15 @@ breaks, alignment, colors and tables) and low-level positioned ops (text, lines,
 that pair with the `qr` and `barcode` packages.
 
 Layout uses the **real Helvetica font metrics**, so wrapping and alignment are accurate.
-Turkish letters (ğ ş ı İ ç ö ü …) work via a *Differences* encoding and octal escapes, so the
-file stays pure ASCII — no font embedding and no binary output. Verified against `pypdf`.
+Turkish letters are mapped via a *Differences* encoding and octal escapes, so the file stays
+pure ASCII — no font embedding, no binary output — and the text **extracts** correctly. Verified
+against `pypdf`.
+
+> **Turkish caveat:** `ç ö ü Ç Ö Ü` (WinAnsi Latin-1) render everywhere. The Turkish-specific
+> letters `İ ş ğ ı Ş Ğ` are encoded correctly (they extract as the right characters) but rely on
+> the built-in Helvetica having those glyphs, which is **unreliable across PDF viewers** — some
+> render them blank. If a receipt must show those letters faithfully in any viewer, embedding a
+> Turkish font is the real fix (planned); until then, prefer `ç/ö/ü` or verify in your target viewer.
 
 ## Install
 
@@ -66,8 +73,8 @@ origin bottom-left, y grows up.
 
 ## Notes
 
-- Text uses the standard Helvetica fonts (no embedding). Turkish is covered; other non-ASCII
-  characters become `?`, and em/en dashes become `-`. (Full Unicode via embedded fonts is a
-  planned second phase.)
+- Text uses the standard Helvetica fonts (no embedding). Turkish is encoded (see the caveat
+  above — `ç/ö/ü` render everywhere; `İ/ş/ğ/ı` are viewer-dependent); other non-ASCII characters
+  become `?`, and em/en dashes become `-`. (Full Unicode via embedded fonts is a planned phase.)
 - Pure LOOK: only the core `array::`, `string::`, `math::` and `crypto::` builtins.
 - The output is a valid, uncompressed PDF; open it in any reader. Verified against `pypdf`.

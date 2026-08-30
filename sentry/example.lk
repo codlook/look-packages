@@ -1,0 +1,24 @@
+// example.lk — using the sentry package.  Run it:  lk example.lk
+//
+// sentry sends errors to Sentry (or any Sentry-compatible ingest). Give it your DSN
+// and a message; call it from a catch block or an error hook.
+
+use "pkg/sentry/sentry.lk"
+
+// DSN looks like https://PUBLIC_KEY@o123.ingest.sentry.io/PROJECT_ID — keep it in env.
+$dsn = env("SENTRY_DSN")
+
+if ($dsn == null || $dsn == "") {
+    print("Set SENTRY_DSN (https://KEY@HOST/PROJECT_ID) to send events.")
+} else {
+    // level: "fatal" | "error" | "warning" | "info" | "debug"
+    $status = sentry_capture($dsn, "LOOK sentry package — hello", "info")
+    print("sent, HTTP status " . $status)          // 200 on success
+}
+
+// From a catch block, report the exception (level "error"):
+//   try {
+//       risky()
+//   } catch ($e) {
+//       sentry_capture_exception($dsn, $e)
+//   }

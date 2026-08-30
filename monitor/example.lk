@@ -1,0 +1,23 @@
+// example.lk — using the monitor package.  Run it:  lk example.lk
+//
+// monitor exposes LOOK's built-in runtime counters (requests, 5xx, uptime, memory,
+// latency, DB pool) as Prometheus text or JSON — no setup, they are always collected.
+
+use "pkg/monitor/monitor.lk"
+use json
+
+// 1. monitor_json() returns the metrics as an assoc — pass it to response::json() in a
+//    route, or json::encode() it yourself for a string. (It's the stats map, not text.)
+print(json::encode(monitor_json()))
+
+// 2. Prometheus exposition format — point Prometheus / Grafana at this.
+print("--- prometheus ---")
+print(monitor_prometheus())
+
+// 3. Mount both as routes in an lk-fcgi app (uncomment inside your app):
+//
+//   use "pkg/monitor/monitor.lk"
+//   monitor_mount("/metrics", [])      // → GET /metrics (Prometheus), GET /metrics/json
+//
+// monitor_mount($prefix, $middlewares) registers the routes for you; pass middlewares
+// (e.g. an auth check) to protect them, or [] to leave them open.

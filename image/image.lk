@@ -142,7 +142,7 @@ function inf__block($bytes, $pos, $out, $outpos, $lh, $dh) {
     return [$out, $outpos, $pos];
 }
 
-function inflate($bytes, $outsize) {
+function image__inflate($bytes, $outsize) {
     $out = inf__zeros($outsize);
     $outpos = 0;
     $pos = 0;
@@ -278,7 +278,7 @@ function png_decode($d) {
     $i = 0;
     while ($i < $cn) { $comp[$i] = img__hxv(string::substr($comphex, $i * 2, 1)) * 16 + img__hxv(string::substr($comphex, $i * 2 + 1, 1)); $i = $i + 1; }
     $stride = $w * $ch;
-    $raw = inflate($comp, $h * ($stride + 1));
+    $raw = image__inflate($comp, $h * ($stride + 1));
     // unfilter -> pixels
     $pix = inf__zeros($h * $stride);
     $y = 0;

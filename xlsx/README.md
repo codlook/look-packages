@@ -68,3 +68,6 @@ anything else text. On read, number cells return as `int`/`float`, everything el
 - Pure LOOK: it builds and parses the ZIP itself (stored + CRC32 to write, inflate to read),
   and `crypto::hex_decode` / `file::read` give it the raw bytes — using only core builtins.
 - Cells are strings or numbers. Styling, formulas and dates are a possible later addition.
+- A whole-number float reads back as an **`int`**: `240.00` written → `240` on read (a spreadsheet
+  stores `240.00` and `240` as the same number). `85.50` stays a float. If a column must always be
+  a float (e.g. money you re-serialize), coerce with `type::to_float()` after reading.

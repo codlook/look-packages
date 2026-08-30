@@ -1,0 +1,28 @@
+// example.lk — using the stripe package.  Run it:  lk example.lk
+//
+// stripe calls the Stripe REST API with your secret key: customers, payment intents,
+// checkout sessions. Amounts are in the smallest currency unit (cents / kuruş).
+
+use "pkg/stripe/stripe.lk"
+
+// Secret key sk_test_… (test mode) — never ship it to the browser; read it from env.
+$sk = env("STRIPE_SECRET_KEY")
+
+if ($sk == null || $sk == "") {
+    print("Set STRIPE_SECRET_KEY (sk_test_…) to call Stripe.")
+} else {
+    // 1. Create a customer.
+    $cust = stripe_create_customer($sk, "musteri@example.com")
+    print("customer id: " . $cust["id"])
+
+    // 2. A payment intent for 10.00 USD (amount in cents).
+    $pi = stripe_create_payment_intent($sk, 1000, "usd")
+    print("client_secret: " . $pi["client_secret"])
+}
+
+// A hosted Checkout session (redirect the customer to $sess["url"]):
+//   $sess = stripe_create_checkout_session($sk, [
+//       "mode" => "payment",
+//       "success_url" => "https://siteniz.com/ok",
+//       "cancel_url"  => "https://siteniz.com/cancel"
+//   ])

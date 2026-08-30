@@ -1,0 +1,25 @@
+// example.lk — using the s3 package.  Run it:  lk example.lk
+//
+// s3 talks to any S3-compatible store (AWS S3, MinIO, Cloudflare R2, DigitalOcean
+// Spaces …) with SigV4 signing. Configure once, then put / get / delete objects.
+
+use "pkg/s3/s3.lk"
+
+// Credentials + endpoint. Keep the secret on the server (env, not source).
+$cfg = [
+    "endpoint"   => "https://s3.eu-central-1.amazonaws.com",  // or your MinIO/R2 URL
+    "region"     => "eu-central-1",
+    "bucket"     => "my-bucket",
+    "access_key" => env("S3_ACCESS_KEY"),
+    "secret_key" => env("S3_SECRET_KEY")
+]
+
+// 1. The public path-style URL of an object (computed locally — no request):
+print(s3_url($cfg, "invoices/2026/ORD10001.pdf"))
+
+// 2. Upload / download / delete (each makes a signed request; needs real creds):
+//   $status = s3_put($cfg, "notes/hello.txt", "Merhaba dünya", "text/plain")  // → 200
+//   $obj    = s3_get($cfg, "notes/hello.txt")                                  // → {status, body}
+//   $status = s3_delete($cfg, "notes/hello.txt")
+//
+//   if ($status == 200) { print("uploaded") }

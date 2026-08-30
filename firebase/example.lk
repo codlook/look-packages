@@ -1,0 +1,28 @@
+// example.lk — using the firebase package.  Run it:  lk example.lk
+//
+// firebase reads and writes Cloud Firestore documents with a service-account token
+// (or a local emulator — no credentials needed for that). Collections and documents
+// map to simple assocs.
+
+use "pkg/firebase/firebase.lk"
+
+// Production: a service-account JSON + your project id.
+//   $cfg = firebase_init(file::read("service-account.json"), "my-project")
+// Local emulator (no credentials): point at the emulator host.
+//   $cfg = firebase_emulator("my-project", "localhost:8080")
+
+$sa = env("FIREBASE_SA")                 // service-account JSON (string)
+
+if ($sa == null || $sa == "") {
+    print("Set FIREBASE_SA (service-account JSON) — or use firebase_emulator() locally.")
+} else {
+    $cfg = firebase_init($sa, env("FIREBASE_PROJECT"))
+
+    $ok = firebase_set($cfg, "orders", "ORD1001", ["total" => 325.5, "status" => "paid"])
+    print("write ok: " . firebase_ok($ok))
+
+    $doc = firebase_get($cfg, "orders", "ORD1001")
+    if (firebase_ok($doc)) { print("read total: " . $doc["total"]) }
+
+    // firebase_add (auto-id), firebase_update, firebase_delete, firebase_list are there too.
+}

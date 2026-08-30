@@ -1,0 +1,29 @@
+// example.lk — using the iyzico package.  Run it:  lk example.lk
+//
+// iyzico integrates the İyzico payment API (cards, 3-D Secure, saved cards, refunds).
+// Configure with your keys in sandbox mode, then call. iyzico_success/iyzico_error
+// read the result envelope for you.
+
+use "pkg/iyzico/iyzico.lk"
+
+$api    = env("IYZICO_API_KEY")
+$secret = env("IYZICO_SECRET_KEY")
+
+if ($api == null || $api == "" || $secret == null || $secret == "") {
+    print("Set IYZICO_API_KEY and IYZICO_SECRET_KEY (sandbox) to call iyzico.")
+} else {
+    $cfg = iyzico_config($api, $secret, 1)          // 1 = sandbox, 0 = production
+
+    // Installment options for a card BIN and a price — a simple read call.
+    $r = iyzico_installments($cfg, "554960", "100.0")
+    if (iyzico_success($r)) {
+        print("installments ok")
+    } else {
+        print("iyzico error: " . iyzico_error($r))
+    }
+}
+
+// A card payment: build $request per İyzico's schema (buyer, card, basket), then:
+//   $result = iyzico_pay($cfg, $request)
+//   if (iyzico_success($result)) { /* paymentId = $result["paymentId"] */ }
+// 3-D Secure: iyzico_3ds_init($cfg, $request) → redirect, then iyzico_3ds_complete(...).

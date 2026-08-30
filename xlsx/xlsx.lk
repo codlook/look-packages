@@ -341,7 +341,7 @@ function inf__block($bytes, $pos, $out, $outpos, $lh, $dh) {
     return [$out, $outpos, $pos];
 }
 
-function inflate($bytes, $outsize) {
+function xlsx__inflate($bytes, $outsize) {
     $out = inf__zeros($outsize);
     $outpos = 0;
     $pos = 0;
@@ -485,7 +485,7 @@ function xlsx__unzip($d) {
             $comp = inf__zeros($csize);
             $j = 0;
             while ($j < $csize) { $comp[$j] = $d[$dstart + $j]; $j = $j + 1; }
-            $raw = inflate($comp, $usize);
+            $raw = xlsx__inflate($comp, $usize);
             $hex = "";
             $j = 0;
             while ($j < $usize) { $hex = $hex . xlsx__byte($raw[$j]); $j = $j + 1; }
